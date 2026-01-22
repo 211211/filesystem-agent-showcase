@@ -6,6 +6,9 @@ authors = ["Nguyễn Hồng Quân <admin@nguyenhongquan.com>"]
 readme = "README.md"
 packages = [{include = "app"}]
 
+[tool.poetry.scripts]
+fs-agent = "app.cli:cli"
+
 [tool.poetry.dependencies]
 python = "^3.11"
 fastapi = "^0.115.0"
@@ -16,6 +19,9 @@ pydantic = "^2.9.0"
 pydantic-settings = "^2.5.0"
 python-multipart = "^0.0.12"
 aiofiles = "^24.1.0"
+diskcache = "^5.6.3"
+watchdog = "^4.0.0"  # Optional: for filesystem monitoring
+click = "^8.1.0"  # CLI framework
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"

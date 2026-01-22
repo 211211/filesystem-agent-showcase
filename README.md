@@ -17,6 +17,7 @@ This project showcases a simple yet powerful pattern for building AI agents: ins
 - **Adaptive File Reading** (v2.0): Smart strategy selection based on file size
 - **Result Caching** (v2.0): TTL-based caching to avoid redundant operations
 - **SSE Streaming** (v2.0): Real-time file streaming and search results via Server-Sent Events
+- **Multi-Tier Cache System** (v3.0): Persistent disk cache with automatic file change detection
 
 ## Architecture
 
@@ -38,6 +39,17 @@ This project showcases a simple yet powerful pattern for building AI agents: ins
 │  │  OpenAI     │◄►│  grep,find  │◄►│  Executor   │       │
 │  │  (GPT-4)    │  │  cat,ls,... │  │  (secure)   │       │
 │  └─────────────┘  └─────────────┘  └─────────────┘       │
+│         │                                  │               │
+│         │         ┌────────────────────────┘               │
+│         │         ▼                                        │
+│         │  ┌─────────────────────────────┐                │
+│         │  │     CacheManager (v3.0)     │                │
+│         │  ├─────────────────────────────┤                │
+│         │  │ • Content Cache (files)     │                │
+│         │  │ • Search Cache (results)    │                │
+│         │  │ • File State Tracker        │                │
+│         │  │ • Persistent Disk Storage   │                │
+│         │  └─────────────────────────────┘                │
 └──────────────────────────────────────────────────────────┘
          │
          ▼
@@ -211,6 +223,122 @@ curl -X POST http://localhost:8000/api/documents \
   -d '{"path": "notes/new-note.md", "content": "# My Note\n\nContent here..."}'
 ```
 
+## Multi-Tier Cache System (v3.0)
+
+The new cache system provides persistent, intelligent caching with automatic file change detection, significantly improving performance for repeated operations.
+
+### Key Features
+
+- **Persistent Storage**: Cache survives agent restarts (stored on disk)
+- **Automatic Invalidation**: Detects file changes via mtime, size, and content hash
+- **Multi-Tier Architecture**: Separate caches for content and search results
+- **LRU Eviction**: Automatically removes least-recently-used entries when limit is reached
+- **50-150x Faster**: Cache hits are dramatically faster than disk reads
+
+### Quick Start
+
+Enable the new cache system when creating an agent:
+
+```python
+from app.agent.filesystem_agent import create_agent
+from pathlib import Path
+
+agent = create_agent(
+    api_key="your_api_key",
+    endpoint="https://your-endpoint.openai.azure.com",
+    deployment_name="gpt-4",
+    api_version="2024-02-15-preview",
+    data_root=Path("./data"),
+    use_new_cache=True,  # Enable new cache system
+)
+
+# Use the agent normally
+response = await agent.chat("Find all Python files")
+
+# Check cache statistics
+stats = agent.get_cache_stats()
+print(f"Cache entries: {stats['new_cache']['disk_cache']['size']}")
+print(f"Disk usage: {stats['new_cache']['disk_cache']['volume']} bytes")
+```
+
+### Configuration
+
+Add to `.env`:
+
+```bash
+# Enable new cache
+USE_NEW_CACHE=true
+
+# Cache configuration
+CACHE_DIRECTORY=tmp/cache
+CACHE_SIZE_LIMIT=524288000  # 500MB
+CACHE_CONTENT_TTL=0         # No expiry (rely on file state tracking)
+CACHE_SEARCH_TTL=300        # 5 minutes
+```
+
+### Cache Management CLI
+
+The project includes a CLI for managing caches:
+
+**Pre-populate cache (warmup):**
+```bash
+# Cache all text files in data directory
+poetry run fs-agent warm-cache -d ./data
+
+# Cache only Python files
+poetry run fs-agent warm-cache -d ./app -p "*.py"
+
+# High concurrency for faster caching
+poetry run fs-agent warm-cache -d ./data -c 20
+```
+
+**View cache statistics:**
+```bash
+# Human-readable output
+poetry run fs-agent cache-stats
+
+# JSON output for scripting
+poetry run fs-agent cache-stats --json
+```
+
+**Clear cache:**
+```bash
+# Clear with confirmation
+poetry run fs-agent clear-cache
+
+# Force clear without confirmation
+poetry run fs-agent clear-cache --force
+```
+
+The cache warmup feature:
+- Automatically detects text files (85+ file types supported)
+- Skips common non-source directories (node_modules, .git, etc.)
+- Uses controlled concurrency to avoid overwhelming the system
+- Provides detailed progress and statistics
+- Handles errors gracefully without stopping the process
+
+### What Gets Cached?
+
+**Cached Operations:**
+- `cat` - Read entire file content
+- `head` - Read first N lines
+- `grep` - Search for patterns in files
+- `find` - Find files by name pattern
+
+**Not Cached (fast or frequently changing):**
+- `ls` - List directory contents
+- `wc` - Count lines/words
+- `tree` - Directory tree structure
+
+### Documentation
+
+For detailed information about the cache system:
+- [Quick Start Guide](docs/CACHE_QUICKSTART.md) - Get started in 3 lines
+- [Migration Guide](docs/CACHE_MIGRATION_GUIDE.md) - Migrate from old cache system
+- [Integration Guide](docs/CACHE_INTEGRATION_GUIDE.md) - Complete integration documentation
+- [Cache Manager API](docs/CACHE_MANAGER.md) - CacheManager API reference
+- [CLI Usage](docs/CACHE_CLI_USAGE.md) - Command-line tools
+
 ## Available Tools
 
 The agent has access to these bash tools (all POSIX-compliant for cross-platform compatibility):
@@ -276,9 +404,9 @@ SMALL_FILE_THRESHOLD=1048576      # 1MB - files below this are read entirely
 MEDIUM_FILE_THRESHOLD=104857600   # 100MB - files below this use grep with query
 ```
 
-### Result Caching
+### Result Caching (v2.0 - Legacy)
 
-Tool execution results are now cached to avoid redundant operations, improving response times for repeated queries.
+The v2.0 in-memory cache is still available for backward compatibility:
 
 **Features:**
 - TTL-based expiration (default: 5 minutes)
@@ -293,6 +421,8 @@ CACHE_ENABLED=true    # Enable/disable caching
 CACHE_TTL=300         # Cache entry lifetime in seconds (5 minutes)
 CACHE_MAX_SIZE=100    # Maximum number of cached entries
 ```
+
+**Note:** The new v3.0 multi-tier cache system (described above) offers significant improvements over this implementation. See the [migration guide](docs/CACHE_MIGRATION_GUIDE.md) for details.
 
 ### Running Benchmarks
 
@@ -379,10 +509,16 @@ All settings can be configured via environment variables in `.env`. Copy `.env.e
 | **Parallel Execution** | | |
 | `PARALLEL_EXECUTION` | `true` | Enable parallel tool execution |
 | `MAX_CONCURRENT_TOOLS` | `5` | Max concurrent executions |
-| **Caching** | | |
+| **Caching (v2.0 - Legacy)** | | |
 | `CACHE_ENABLED` | `true` | Enable result caching |
 | `CACHE_TTL` | `300` | Cache TTL in seconds (5 min) |
 | `CACHE_MAX_SIZE` | `100` | Max cached entries |
+| **Caching (v3.0 - New)** | | |
+| `USE_NEW_CACHE` | `false` | Enable new multi-tier cache |
+| `CACHE_DIRECTORY` | `tmp/cache` | Cache storage directory |
+| `CACHE_SIZE_LIMIT` | `524288000` | Max cache size (500MB) |
+| `CACHE_CONTENT_TTL` | `0` | Content cache TTL (0 = no expiry) |
+| `CACHE_SEARCH_TTL` | `300` | Search cache TTL (5 min) |
 | **Adaptive Reading** | | |
 | `SMALL_FILE_THRESHOLD` | `1048576` | Small file threshold (1MB) |
 | `MEDIUM_FILE_THRESHOLD` | `104857600` | Medium file threshold (100MB) |
@@ -555,16 +691,24 @@ filesystem-agent-showcase/
 │   ├── agent/
 │   │   ├── filesystem_agent.py # Core agent logic
 │   │   ├── orchestrator.py     # Parallel tool execution (v2.0)
-│   │   ├── cache.py            # TTL-based result cache (v2.0)
+│   │   ├── cache.py            # TTL-based result cache (v2.0 - legacy)
 │   │   ├── prompts.py          # System prompts
 │   │   └── tools/
 │   │       ├── bash_tools.py   # Tool definitions
 │   │       ├── file_tools.py   # File operations
 │   │       ├── streaming.py    # Async streaming reader (v2.0)
 │   │       └── adaptive_reader.py  # Smart file reading (v2.0)
-│   └── sandbox/
-│       ├── executor.py         # Secure command execution
-│       └── cached_executor.py  # Executor with caching (v2.0)
+│   ├── cache/                  # Multi-tier cache system (v3.0)
+│   │   ├── cache_manager.py    # Unified cache interface
+│   │   ├── disk_cache.py       # Persistent disk cache (L2)
+│   │   ├── file_state.py       # File change detection
+│   │   ├── content_cache.py    # File content cache
+│   │   ├── search_cache.py     # Search result cache
+│   │   └── warmup.py           # Cache pre-population
+│   ├── sandbox/
+│   │   ├── executor.py         # Secure command execution
+│   │   └── cached_executor.py  # Executor with caching (v2.0 - legacy)
+│   └── cli.py                  # CLI commands (fs-agent)
 ├── benchmarks/                 # Performance benchmarks (v2.0)
 │   └── benchmark_v2.py         # Benchmark suite for v2.0 features
 ├── data/                       # Sample documents
@@ -572,21 +716,32 @@ filesystem-agent-showcase/
 │   ├── knowledge-base/         # Sample knowledge base
 │   ├── notes/                  # Sample notes
 │   └── projects/               # Sample projects
-├── docs/                       # Documentation
-│   ├── ANALYSIS_VI.md          # Architecture analysis (Vietnamese)
-│   ├── IMPLEMENTATION_PLAN_VI.md   # Implementation plan (Vietnamese)
-│   └── CACHE_IMPROVEMENT_PLAN_VI.md # Cache improvement plan (Vietnamese)
+├── examples/                   # Example scripts and demos
+│   ├── cache_demo.py           # Interactive cache demos
+│   ├── cache_manager_example.py # CacheManager usage examples
+│   └── cache_warmup_example.py # Cache warmup examples
+├── scripts/                    # Utility scripts
+│   └── verify_warmup_installation.sh # Verify cache installation
 ├── tests/
 │   ├── test_agent.py           # Agent tests
 │   ├── test_sandbox.py         # Sandbox tests
 │   ├── test_tools.py           # Tool tests
 │   ├── test_orchestrator.py    # Parallel execution tests (v2.0)
-│   ├── test_cache.py           # Caching tests (v2.0)
-│   ├── test_cached_executor.py # Cached executor tests (v2.0)
+│   ├── test_cache.py           # Caching tests (v2.0 - legacy)
+│   ├── test_cached_executor.py # Cached executor tests (v2.0 - legacy)
 │   ├── test_streaming.py       # Streaming reader tests (v2.0)
 │   ├── test_adaptive_reader.py # Adaptive reader tests (v2.0)
 │   ├── test_stream.py          # SSE streaming tests (v2.0)
-│   └── test_integration.py     # End-to-end integration tests (v2.0)
+│   ├── test_integration.py     # End-to-end integration tests (v2.0)
+│   ├── test_disk_cache.py      # Persistent cache tests (v3.0)
+│   ├── test_search_cache.py    # Search cache tests (v3.0)
+│   ├── test_cache_manager.py   # Cache manager tests (v3.0)
+│   ├── test_cache_warmup.py    # Cache warmup tests (v3.0)
+│   ├── test_agent_cache_integration.py # Agent cache integration (v3.0)
+│   └── test_cli.py             # CLI command tests (v3.0)
+├── tmp/                        # Runtime cache storage (gitignored)
+│   └── .gitkeep                # Preserve directory structure
+├── test_api.sh                 # API testing script
 ├── Dockerfile
 ├── compose.yml                 # Podman/Docker Compose config
 ├── Makefile

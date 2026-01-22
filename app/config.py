@@ -39,10 +39,17 @@ class Settings(BaseSettings):
     parallel_execution: bool = True
     max_concurrent_tools: int = 5
 
-    # Cache Configuration
+    # Cache Configuration (legacy - for backward compatibility)
     cache_enabled: bool = True
     cache_ttl: int = 300  # 5 minutes
     cache_max_size: int = 100
+
+    # Cache Manager Configuration (new unified cache system)
+    cache_directory: str = "tmp/cache"
+    cache_size_limit: int = 500 * 1024 * 1024  # 500MB in bytes
+    cache_content_ttl: float = 0  # No expiry for content (invalidate on file change)
+    cache_search_ttl: float = 300  # 5 minutes for search results
+    cache_warmup_concurrency: int = 10  # Parallel files during cache warmup
 
     # Server Configuration
     host: str = "0.0.0.0"

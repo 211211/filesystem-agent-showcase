@@ -6,7 +6,7 @@ Inspired by Vercel's approach: https://vercel.com/blog/how-to-build-agents-with-
 import json
 import logging
 from pathlib import Path
-from typing import Optional, AsyncGenerator, Any
+from typing import Optional, AsyncGenerator, Any, Callable, Awaitable
 from dataclasses import dataclass, field
 from openai import AsyncAzureOpenAI
 
@@ -15,6 +15,7 @@ from app.agent.prompts import SYSTEM_PROMPT
 from app.sandbox.executor import SandboxExecutor, ExecutionResult
 from app.sandbox.cached_executor import CachedSandboxExecutor
 from app.agent.orchestrator import ParallelToolOrchestrator
+from app.cache import CacheManager
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class FilesystemAgent:
         max_tool_iterations: int = 10,
         parallel_execution: bool = True,
         max_concurrent_tools: int = 5,
+        cache_manager: Optional[CacheManager] = None,
     ):
         """
         Initialize the filesystem agent.
@@ -102,6 +104,7 @@ class FilesystemAgent:
             max_tool_iterations: Maximum number of tool call iterations
             parallel_execution: Whether to enable parallel tool execution
             max_concurrent_tools: Maximum number of concurrent tool executions
+            cache_manager: Optional CacheManager for advanced caching (new system)
         """
         self.client = client
         self.deployment_name = deployment_name
@@ -110,6 +113,7 @@ class FilesystemAgent:
         self.max_tool_iterations = max_tool_iterations
         self.parallel_execution = parallel_execution
         self.max_concurrent_tools = max_concurrent_tools
+        self.cache_manager = cache_manager
 
         # Initialize orchestrator for parallel execution
         if parallel_execution:
@@ -133,6 +137,14 @@ class FilesystemAgent:
         logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
 
         try:
+            # If new cache manager is available, use cached versions for read/search operations
+            if self.cache_manager is not None:
+                if tool_call.name in ("cat", "head"):
+                    return await self._cached_read_file(tool_call)
+                elif tool_call.name in ("grep", "find"):
+                    return await self._cached_search(tool_call)
+                # Other operations (ls, wc, tree, etc.) fall through to regular execution
+
             # Build the command from tool name and arguments
             command = build_command(tool_call.name, tool_call.arguments)
             logger.debug(f"Built command: {command}")
@@ -153,6 +165,143 @@ class FilesystemAgent:
                 command=f"{tool_call.name} {tool_call.arguments}",
                 error="ExecutionError",
             )
+
+    async def _cached_read_file(self, tool_call: ToolCall) -> ExecutionResult:
+        """
+        Execute a file read operation with caching.
+
+        This method uses the CacheManager's ContentCache to cache file contents,
+        avoiding repeated disk reads. The cache automatically detects when files
+        have changed and invalidates stale entries.
+
+        Args:
+            tool_call: The tool call to execute (cat or head)
+
+        Returns:
+            The execution result with cached or fresh content
+        """
+        path_str = tool_call.arguments.get("path", "")
+        file_path = (self.data_root / path_str).resolve()
+
+        try:
+            # Define the loader function that reads from disk
+            async def load_file(p: Path) -> str:
+                # Build and execute the command normally
+                command = build_command(tool_call.name, tool_call.arguments)
+                result = await self.sandbox.execute(command)
+                if result.success:
+                    return result.stdout
+                else:
+                    raise Exception(f"Failed to read file: {result.stderr}")
+
+            # Get content from cache or load fresh
+            content = await self.cache_manager.content_cache.get_content(
+                file_path,
+                load_file
+            )
+
+            # Build command string for logging
+            command = build_command(tool_call.name, tool_call.arguments)
+
+            return ExecutionResult(
+                success=True,
+                stdout=content,
+                stderr="",
+                return_code=0,
+                command=" ".join(command),
+                error=None,
+            )
+
+        except Exception as e:
+            logger.error(f"Error in cached read for {tool_call.name}: {e}")
+            command = build_command(tool_call.name, tool_call.arguments)
+            return ExecutionResult(
+                success=False,
+                stdout="",
+                stderr=str(e),
+                return_code=-1,
+                command=" ".join(command),
+                error="CachedReadError",
+            )
+
+    async def _cached_search(self, tool_call: ToolCall) -> ExecutionResult:
+        """
+        Execute a search operation with caching.
+
+        This method uses the CacheManager's SearchCache to cache search results,
+        avoiding repeated expensive searches. The cache automatically detects when
+        files in the search scope have changed and invalidates stale results.
+
+        Args:
+            tool_call: The tool call to execute (grep or find)
+
+        Returns:
+            The execution result with cached or fresh search results
+        """
+        try:
+            # Extract search parameters
+            if tool_call.name == "grep":
+                pattern = tool_call.arguments.get("pattern", "")
+                path_str = tool_call.arguments.get("path", "")
+                scope = (self.data_root / path_str).resolve()
+                options = {
+                    "recursive": tool_call.arguments.get("recursive", True),
+                    "ignore_case": tool_call.arguments.get("ignore_case", False),
+                }
+            elif tool_call.name == "find":
+                pattern = tool_call.arguments.get("name_pattern", "")
+                path_str = tool_call.arguments.get("path", "")
+                scope = (self.data_root / path_str).resolve()
+                options = {
+                    "type": tool_call.arguments.get("type", "f"),
+                }
+            else:
+                # Unknown search operation, fallback to regular execution
+                raise ValueError(f"Unknown search operation: {tool_call.name}")
+
+            # Try to get from cache
+            cached_result = await self.cache_manager.search_cache.get_search_result(
+                operation=tool_call.name,
+                pattern=pattern,
+                scope=scope,
+                options=options,
+            )
+
+            if cached_result is not None:
+                # Cache hit
+                command = build_command(tool_call.name, tool_call.arguments)
+                return ExecutionResult(
+                    success=True,
+                    stdout=cached_result,
+                    stderr="",
+                    return_code=0,
+                    command=" ".join(command),
+                    error=None,
+                )
+
+            # Cache miss - execute and cache the result
+            command = build_command(tool_call.name, tool_call.arguments)
+            result = await self.sandbox.execute(command)
+
+            if result.success:
+                # Cache the successful result
+                await self.cache_manager.search_cache.set_search_result(
+                    operation=tool_call.name,
+                    pattern=pattern,
+                    scope=scope,
+                    options=options,
+                    result=result.stdout,
+                    ttl=300,  # 5 minutes TTL
+                )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in cached search for {tool_call.name}: {e}")
+            # Fallback to regular execution on error
+            command = build_command(tool_call.name, tool_call.arguments)
+            result = await self.sandbox.execute(command)
+            return result
 
     def _parse_tool_calls(self, response_message) -> list[ToolCall]:
         """Parse tool calls from the LLM response."""
@@ -212,6 +361,37 @@ class FilesystemAgent:
             result = await self._execute_tool(tc)
             results.append((tc, result))
         return results
+
+    def get_cache_stats(self) -> dict:
+        """
+        Get cache statistics from all cache systems.
+
+        Returns:
+            Dictionary with cache statistics:
+            - new_cache: Stats from CacheManager (if enabled)
+            - old_cache: Stats from CachedSandboxExecutor (if enabled)
+
+        Example:
+            >>> agent = create_agent(...)
+            >>> stats = agent.get_cache_stats()
+            >>> print(f"Cache size: {stats['new_cache']['disk_cache']['size']} entries")
+            >>> print(f"Disk usage: {stats['new_cache']['disk_cache']['volume']} bytes")
+        """
+        stats = {}
+
+        # Get stats from new cache system
+        if self.cache_manager is not None:
+            stats["new_cache"] = self.cache_manager.stats()
+        else:
+            stats["new_cache"] = {"enabled": False}
+
+        # Get stats from old cache system (CachedSandboxExecutor)
+        if isinstance(self.sandbox, CachedSandboxExecutor):
+            stats["old_cache"] = self.sandbox.cache_stats()
+        else:
+            stats["old_cache"] = {"enabled": False}
+
+        return stats
 
     async def chat(
         self,
@@ -537,6 +717,12 @@ def create_agent(
     cache_enabled: bool = True,
     cache_ttl: int = 300,
     cache_max_size: int = 100,
+    # New cache system parameters
+    use_new_cache: bool = False,
+    cache_directory: str = "tmp/cache",
+    cache_size_limit: int = 500 * 1024 * 1024,
+    cache_content_ttl: float = 0,
+    cache_search_ttl: float = 300,
 ) -> FilesystemAgent:
     """
     Factory function to create a FilesystemAgent.
@@ -553,9 +739,14 @@ def create_agent(
         max_output_size: Maximum output size in bytes (default: 1MB)
         parallel_execution: Whether to enable parallel tool execution
         max_concurrent_tools: Maximum number of concurrent tool executions
-        cache_enabled: Whether to enable result caching (default: True)
-        cache_ttl: Cache TTL in seconds (default: 300 = 5 minutes)
-        cache_max_size: Maximum number of cached entries (default: 100)
+        cache_enabled: Whether to enable old cache system (CachedSandboxExecutor)
+        cache_ttl: Old cache TTL in seconds (default: 300 = 5 minutes)
+        cache_max_size: Maximum number of cached entries for old cache (default: 100)
+        use_new_cache: Whether to use new CacheManager system (default: False for backward compatibility)
+        cache_directory: Directory for new cache storage (default: "tmp/cache")
+        cache_size_limit: Maximum size for new cache in bytes (default: 500MB)
+        cache_content_ttl: TTL for content cache (default: 0 = no expiry)
+        cache_search_ttl: TTL for search cache (default: 300 = 5 minutes)
 
     Returns:
         Configured FilesystemAgent instance
@@ -566,8 +757,20 @@ def create_agent(
         azure_endpoint=endpoint,
     )
 
-    # Use CachedSandboxExecutor when caching is enabled, otherwise use regular SandboxExecutor
-    if cache_enabled:
+    # Initialize new cache system if enabled
+    cache_manager = None
+    if use_new_cache:
+        logger.info("Initializing new CacheManager system")
+        cache_manager = CacheManager(
+            cache_dir=cache_directory,
+            size_limit=cache_size_limit,
+            content_ttl=cache_content_ttl,
+            search_ttl=cache_search_ttl,
+        )
+
+    # Use CachedSandboxExecutor when old caching is enabled, otherwise use regular SandboxExecutor
+    if cache_enabled and not use_new_cache:
+        logger.info("Using old CachedSandboxExecutor system")
         sandbox = CachedSandboxExecutor(
             root_path=data_root,
             timeout=command_timeout,
@@ -579,6 +782,7 @@ def create_agent(
             cache_max_size=cache_max_size,
         )
     else:
+        logger.info("Using regular SandboxExecutor (no old cache)")
         sandbox = SandboxExecutor(
             root_path=data_root,
             timeout=command_timeout,
@@ -594,4 +798,5 @@ def create_agent(
         sandbox=sandbox,
         parallel_execution=parallel_execution,
         max_concurrent_tools=max_concurrent_tools,
+        cache_manager=cache_manager,
     )
