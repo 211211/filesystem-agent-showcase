@@ -31,6 +31,19 @@ class Settings(BaseSettings):
     max_file_size: int = 10 * 1024 * 1024  # 10MB default, in bytes
     max_output_size: int = 1024 * 1024  # 1MB for command output
 
+    # Adaptive File Reading Thresholds
+    small_file_threshold: int = 1_000_000      # 1MB - files below this are read entirely
+    medium_file_threshold: int = 100_000_000   # 100MB - files below this use grep with query
+
+    # Parallel Execution Configuration
+    parallel_execution: bool = True
+    max_concurrent_tools: int = 5
+
+    # Cache Configuration
+    cache_enabled: bool = True
+    cache_ttl: int = 300  # 5 minutes
+    cache_max_size: int = 100
+
     # Server Configuration
     host: str = "0.0.0.0"
     port: int = 8000

@@ -174,6 +174,32 @@ BASH_TOOLS = [
                 "required": ["path"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "smart_read",
+            "description": "Intelligently read a file based on its size. For small files (<1MB), reads the entire content. For medium files (1-100MB) with a query, uses grep. For large files (>100MB), reads head and tail portions. Use this for reading files of unknown size safely.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to read (relative to data root)"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional search pattern for grep strategy (used for medium-sized files)"
+                    },
+                    "max_lines": {
+                        "type": "integer",
+                        "description": "Maximum lines to read from head/tail for large files",
+                        "default": 100
+                    }
+                },
+                "required": ["path"]
+            }
+        }
     }
 ]
 
@@ -247,6 +273,32 @@ def build_wc_command(path: str, lines_only: bool = False) -> list[str]:
     return cmd
 
 
+def build_smart_read_command(
+    path: str,
+    query: str = None,
+    max_lines: int = 100
+) -> dict:
+    """
+    Build smart_read command arguments.
+
+    Note: This returns a dict with parameters for AdaptiveFileReader,
+    not a shell command list, since smart_read uses the AdaptiveFileReader class.
+
+    Args:
+        path: Path to the file
+        query: Optional search query
+        max_lines: Maximum lines for head/tail strategy
+
+    Returns:
+        Dictionary with parameters for AdaptiveFileReader.smart_read()
+    """
+    return {
+        "path": path,
+        "query": query,
+        "max_lines": max_lines
+    }
+
+
 def get_command_builder(tool_name: str) -> callable:
     """Get the command builder function for a tool."""
     builders = {
@@ -257,6 +309,7 @@ def get_command_builder(tool_name: str) -> callable:
         "ls": build_ls_command,
         "tree": build_tree_command,
         "wc": build_wc_command,
+        "smart_read": build_smart_read_command,
     }
     return builders.get(tool_name)
 
@@ -297,6 +350,11 @@ def build_command(tool_name: str, args: dict[str, Any]) -> list[str]:
         "wc": lambda a: build_wc_command(
             path=a["path"],
             lines_only=a.get("lines_only", False)
+        ),
+        "smart_read": lambda a: build_smart_read_command(
+            path=a["path"],
+            query=a.get("query"),
+            max_lines=a.get("max_lines", 100)
         ),
     }
 

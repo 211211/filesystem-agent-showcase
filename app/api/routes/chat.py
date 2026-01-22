@@ -2,10 +2,12 @@
 Chat API routes for the Filesystem Agent.
 """
 
+import json
 import uuid
 import logging
-from typing import Optional
+from typing import Optional, AsyncGenerator
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import get_settings, Settings
@@ -66,6 +68,11 @@ def get_agent(settings: Settings = Depends(get_settings)) -> FilesystemAgent:
         command_timeout=settings.command_timeout,
         max_file_size=settings.max_file_size,
         max_output_size=settings.max_output_size,
+        parallel_execution=settings.parallel_execution,
+        max_concurrent_tools=settings.max_concurrent_tools,
+        cache_enabled=settings.cache_enabled,
+        cache_ttl=settings.cache_ttl,
+        cache_max_size=settings.cache_max_size,
     )
 
 
@@ -149,3 +156,143 @@ async def get_session_history(session_id: str):
     if session_id in _sessions:
         return {"session_id": session_id, "history": _sessions[session_id]}
     raise HTTPException(status_code=404, detail="Session not found")
+
+
+async def sse_event_generator(
+    agent: FilesystemAgent,
+    message: str,
+    session_id: str,
+    history: list[dict],
+) -> AsyncGenerator[str, None]:
+    """
+    Generate SSE events from the agent's streaming response.
+
+    Args:
+        agent: The filesystem agent
+        message: User message
+        session_id: Session ID
+        history: Conversation history
+
+    Yields:
+        SSE formatted strings
+    """
+    try:
+        async for event_type, event_data in agent.chat_stream(message, history):
+            # Add session_id to all events
+            event_data["session_id"] = session_id
+            yield f"event: {event_type}\ndata: {json.dumps(event_data)}\n\n"
+
+            # Update session history on done event
+            if event_type == "done":
+                history.append({"role": "user", "content": message})
+                history.append({"role": "assistant", "content": event_data.get("message", "")})
+                _sessions[session_id] = history[-50:]  # Limit history
+
+    except Exception as e:
+        logger.exception(f"Error in SSE generator: {e}")
+        error_data = {
+            "message": str(e),
+            "type": type(e).__name__,
+            "session_id": session_id,
+        }
+        yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
+
+
+@router.post("/stream")
+async def chat_stream(
+    request: ChatRequest,
+    agent: FilesystemAgent = Depends(get_agent),
+):
+    """
+    Stream a chat response via Server-Sent Events (SSE).
+
+    This endpoint provides real-time streaming of:
+    - Status updates (thinking, executing tools)
+    - Tool calls as they are made
+    - Tool results as they complete
+    - LLM response tokens as they are generated
+    - Final done event with complete message
+
+    **SSE Event Types:**
+
+    - `status`: Progress updates
+      ```
+      event: status
+      data: {"stage": "thinking", "message": "Analyzing...", "session_id": "..."}
+      ```
+
+    - `tool_call`: When agent decides to call a tool
+      ```
+      event: tool_call
+      data: {"id": "call_1", "name": "grep", "arguments": {...}, "session_id": "..."}
+      ```
+
+    - `tool_result`: When tool execution completes
+      ```
+      event: tool_result
+      data: {"id": "call_1", "name": "grep", "success": true, "output": "...", "session_id": "..."}
+      ```
+
+    - `token`: LLM response tokens (streamed one by one)
+      ```
+      event: token
+      data: {"content": "I", "session_id": "..."}
+      ```
+
+    - `done`: Final event with complete response
+      ```
+      event: done
+      data: {"message": "Full response...", "tool_calls_count": 2, "iterations": 1, "session_id": "..."}
+      ```
+
+    - `error`: If an error occurs
+      ```
+      event: error
+      data: {"message": "Error details", "type": "ErrorType", "session_id": "..."}
+      ```
+
+    **Example usage with curl:**
+    ```bash
+    curl -N -X POST http://localhost:8000/api/chat/stream \\
+      -H "Content-Type: application/json" \\
+      -d '{"message": "Find all markdown files"}'
+    ```
+
+    **Example usage with JavaScript:**
+    ```javascript
+    const eventSource = new EventSource('/api/chat/stream', {
+      method: 'POST',
+      body: JSON.stringify({message: 'Find all markdown files'})
+    });
+
+    eventSource.addEventListener('token', (e) => {
+      const data = JSON.parse(e.data);
+      console.log(data.content); // Stream tokens
+    });
+
+    eventSource.addEventListener('done', (e) => {
+      const data = JSON.parse(e.data);
+      console.log(data.message); // Final message
+    });
+    ```
+    """
+    try:
+        # Get or create session
+        session_id = request.session_id or str(uuid.uuid4())
+        history = _sessions.get(session_id, [])
+
+        logger.info(f"Starting streaming chat for session {session_id}")
+
+        return StreamingResponse(
+            sse_event_generator(agent, request.message, session_id, history),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",  # Disable nginx buffering
+            }
+        )
+
+    except Exception as e:
+        logger.exception(f"Error starting streaming chat: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

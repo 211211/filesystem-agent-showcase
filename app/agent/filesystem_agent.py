@@ -6,13 +6,15 @@ Inspired by Vercel's approach: https://vercel.com/blog/how-to-build-agents-with-
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, AsyncGenerator, Any
 from dataclasses import dataclass, field
 from openai import AsyncAzureOpenAI
 
 from app.agent.tools.bash_tools import BASH_TOOLS, build_command
 from app.agent.prompts import SYSTEM_PROMPT
 from app.sandbox.executor import SandboxExecutor, ExecutionResult
+from app.sandbox.cached_executor import CachedSandboxExecutor
+from app.agent.orchestrator import ParallelToolOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,8 @@ class FilesystemAgent:
         data_root: Path,
         sandbox: SandboxExecutor,
         max_tool_iterations: int = 10,
+        parallel_execution: bool = True,
+        max_concurrent_tools: int = 5,
     ):
         """
         Initialize the filesystem agent.
@@ -96,12 +100,25 @@ class FilesystemAgent:
             data_root: Root directory for file operations
             sandbox: The sandbox executor for running commands
             max_tool_iterations: Maximum number of tool call iterations
+            parallel_execution: Whether to enable parallel tool execution
+            max_concurrent_tools: Maximum number of concurrent tool executions
         """
         self.client = client
         self.deployment_name = deployment_name
         self.data_root = data_root
         self.sandbox = sandbox
         self.max_tool_iterations = max_tool_iterations
+        self.parallel_execution = parallel_execution
+        self.max_concurrent_tools = max_concurrent_tools
+
+        # Initialize orchestrator for parallel execution
+        if parallel_execution:
+            self._orchestrator = ParallelToolOrchestrator(
+                sandbox=sandbox,
+                max_concurrent=max_concurrent_tools,
+            )
+        else:
+            self._orchestrator = None
 
     async def _execute_tool(self, tool_call: ToolCall) -> ExecutionResult:
         """
@@ -153,6 +170,48 @@ class FilesystemAgent:
                     arguments=arguments,
                 ))
         return tool_calls
+
+    async def _execute_tools_parallel(
+        self,
+        tool_calls: list[ToolCall],
+    ) -> list[tuple[ToolCall, ExecutionResult]]:
+        """
+        Execute multiple tool calls in parallel using the orchestrator.
+
+        Args:
+            tool_calls: List of tool calls to execute
+
+        Returns:
+            List of (tool_call, result) tuples
+        """
+        if not self._orchestrator:
+            # Fallback to sequential execution if orchestrator not available
+            results = []
+            for tc in tool_calls:
+                result = await self._execute_tool(tc)
+                results.append((tc, result))
+            return results
+
+        return await self._orchestrator.execute_with_strategy(tool_calls)
+
+    async def _execute_tools_sequential(
+        self,
+        tool_calls: list[ToolCall],
+    ) -> list[tuple[ToolCall, ExecutionResult]]:
+        """
+        Execute tool calls sequentially (original behavior).
+
+        Args:
+            tool_calls: List of tool calls to execute
+
+        Returns:
+            List of (tool_call, result) tuples
+        """
+        results = []
+        for tc in tool_calls:
+            result = await self._execute_tool(tc)
+            results.append((tc, result))
+        return results
 
     async def chat(
         self,
@@ -230,9 +289,16 @@ class FilesystemAgent:
                 ]
             })
 
-            # Execute each tool and add results
-            for tc in tool_calls:
-                result = await self._execute_tool(tc)
+            # Execute tools (parallel or sequential based on configuration)
+            if self.parallel_execution and len(tool_calls) > 1:
+                logger.info(f"Executing {len(tool_calls)} tools in parallel")
+                execution_results = await self._execute_tools_parallel(tool_calls)
+            else:
+                logger.info(f"Executing {len(tool_calls)} tools sequentially")
+                execution_results = await self._execute_tools_sequential(tool_calls)
+
+            # Process results and add to messages
+            for tc, result in execution_results:
                 tool_result = {
                     "tool_call_id": tc.id,
                     "tool_name": tc.name,
@@ -256,6 +322,205 @@ class FilesystemAgent:
             tool_results=all_tool_results,
         )
 
+    async def chat_stream(
+        self,
+        user_message: str,
+        history: Optional[list[dict]] = None,
+    ) -> AsyncGenerator[tuple[str, dict[str, Any]], None]:
+        """
+        Process a user message and stream the response as SSE events.
+
+        This method implements the same agent loop as chat() but yields
+        events as they occur for real-time streaming.
+
+        Event types:
+        - status: {"stage": str, "message": str}
+        - tool_call: {"id": str, "name": str, "arguments": dict}
+        - tool_result: {"id": str, "name": str, "success": bool, "output": str}
+        - token: {"content": str}
+        - done: {"message": str, "tool_calls_count": int, "iterations": int}
+        - error: {"message": str, "type": str}
+
+        Args:
+            user_message: The user's message
+            history: Optional conversation history
+
+        Yields:
+            Tuples of (event_type, event_data)
+        """
+        # Build message history
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        if history:
+            messages.extend(history)
+
+        messages.append({"role": "user", "content": user_message})
+
+        all_tool_calls: list[ToolCall] = []
+        total_iterations = 0
+
+        yield ("status", {"stage": "thinking", "message": "Analyzing your request..."})
+
+        # Agent loop
+        for iteration in range(self.max_tool_iterations):
+            total_iterations = iteration + 1
+            logger.info(f"Agent iteration {iteration + 1}/{self.max_tool_iterations}")
+
+            yield ("status", {
+                "stage": "llm_call",
+                "message": f"Calling LLM (iteration {iteration + 1})...",
+                "iteration": iteration + 1,
+            })
+
+            try:
+                # Call the LLM with streaming
+                stream = await self.client.chat.completions.create(
+                    model=self.deployment_name,
+                    messages=messages,
+                    tools=BASH_TOOLS,
+                    tool_choice="auto",
+                    stream=True,
+                )
+
+                # Collect the streamed response
+                collected_content = ""
+                collected_tool_calls: list[dict] = []
+                current_tool_call: dict = {}
+
+                async for chunk in stream:
+                    delta = chunk.choices[0].delta if chunk.choices else None
+
+                    if delta is None:
+                        continue
+
+                    # Stream content tokens
+                    if delta.content:
+                        collected_content += delta.content
+                        yield ("token", {"content": delta.content})
+
+                    # Collect tool calls
+                    if delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            idx = tc_delta.index
+
+                            # Extend list if needed
+                            while len(collected_tool_calls) <= idx:
+                                collected_tool_calls.append({
+                                    "id": "",
+                                    "name": "",
+                                    "arguments": "",
+                                })
+
+                            if tc_delta.id:
+                                collected_tool_calls[idx]["id"] = tc_delta.id
+                            if tc_delta.function:
+                                if tc_delta.function.name:
+                                    collected_tool_calls[idx]["name"] = tc_delta.function.name
+                                if tc_delta.function.arguments:
+                                    collected_tool_calls[idx]["arguments"] += tc_delta.function.arguments
+
+                # Check if we have tool calls to execute
+                if not collected_tool_calls:
+                    # No tool calls, we're done
+                    yield ("done", {
+                        "message": collected_content,
+                        "tool_calls_count": len(all_tool_calls),
+                        "iterations": total_iterations,
+                    })
+                    return
+
+                # Parse tool calls
+                tool_calls = []
+                for tc_data in collected_tool_calls:
+                    try:
+                        arguments = json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}
+                    except json.JSONDecodeError:
+                        arguments = {"raw": tc_data["arguments"]}
+
+                    tc = ToolCall(
+                        id=tc_data["id"],
+                        name=tc_data["name"],
+                        arguments=arguments,
+                    )
+                    tool_calls.append(tc)
+                    all_tool_calls.append(tc)
+
+                    # Emit tool_call event
+                    yield ("tool_call", {
+                        "id": tc.id,
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    })
+
+                # Add assistant message with tool calls to history
+                messages.append({
+                    "role": "assistant",
+                    "content": collected_content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": json.dumps(tc.arguments),
+                            }
+                        }
+                        for tc in tool_calls
+                    ]
+                })
+
+                # Execute tools
+                yield ("status", {
+                    "stage": "executing_tools",
+                    "message": f"Executing {len(tool_calls)} tool(s)...",
+                    "tool_count": len(tool_calls),
+                })
+
+                if self.parallel_execution and len(tool_calls) > 1:
+                    logger.info(f"Executing {len(tool_calls)} tools in parallel")
+                    execution_results = await self._execute_tools_parallel(tool_calls)
+                else:
+                    logger.info(f"Executing {len(tool_calls)} tools sequentially")
+                    execution_results = await self._execute_tools_sequential(tool_calls)
+
+                # Process and stream results
+                for tc, result in execution_results:
+                    output = result.stdout if result.success else f"Error: {result.stderr}"
+
+                    yield ("tool_result", {
+                        "id": tc.id,
+                        "name": tc.name,
+                        "success": result.success,
+                        "output": output[:1000] + "..." if len(output) > 1000 else output,  # Truncate for streaming
+                    })
+
+                    # Add tool result to messages
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": output,
+                    })
+
+            except Exception as e:
+                logger.exception(f"Error in chat_stream: {e}")
+                yield ("error", {
+                    "message": str(e),
+                    "type": type(e).__name__,
+                })
+                return
+
+        # Max iterations reached
+        logger.warning("Max tool iterations reached")
+        yield ("status", {
+            "stage": "max_iterations",
+            "message": "Maximum iterations reached",
+        })
+        yield ("done", {
+            "message": "I've reached the maximum number of operations. Here's what I found so far.",
+            "tool_calls_count": len(all_tool_calls),
+            "iterations": total_iterations,
+        })
+
 
 def create_agent(
     api_key: str,
@@ -267,6 +532,11 @@ def create_agent(
     command_timeout: int = 30,
     max_file_size: int = 10 * 1024 * 1024,  # 10MB default
     max_output_size: int = 1024 * 1024,  # 1MB default
+    parallel_execution: bool = True,
+    max_concurrent_tools: int = 5,
+    cache_enabled: bool = True,
+    cache_ttl: int = 300,
+    cache_max_size: int = 100,
 ) -> FilesystemAgent:
     """
     Factory function to create a FilesystemAgent.
@@ -281,6 +551,11 @@ def create_agent(
         command_timeout: Command execution timeout in seconds
         max_file_size: Maximum file size for cat operations in bytes (default: 10MB)
         max_output_size: Maximum output size in bytes (default: 1MB)
+        parallel_execution: Whether to enable parallel tool execution
+        max_concurrent_tools: Maximum number of concurrent tool executions
+        cache_enabled: Whether to enable result caching (default: True)
+        cache_ttl: Cache TTL in seconds (default: 300 = 5 minutes)
+        cache_max_size: Maximum number of cached entries (default: 100)
 
     Returns:
         Configured FilesystemAgent instance
@@ -291,17 +566,32 @@ def create_agent(
         azure_endpoint=endpoint,
     )
 
-    sandbox = SandboxExecutor(
-        root_path=data_root,
-        timeout=command_timeout,
-        max_file_size=max_file_size,
-        max_output_size=max_output_size,
-        enabled=sandbox_enabled,
-    )
+    # Use CachedSandboxExecutor when caching is enabled, otherwise use regular SandboxExecutor
+    if cache_enabled:
+        sandbox = CachedSandboxExecutor(
+            root_path=data_root,
+            timeout=command_timeout,
+            max_file_size=max_file_size,
+            max_output_size=max_output_size,
+            enabled=sandbox_enabled,
+            cache_enabled=cache_enabled,
+            cache_ttl=cache_ttl,
+            cache_max_size=cache_max_size,
+        )
+    else:
+        sandbox = SandboxExecutor(
+            root_path=data_root,
+            timeout=command_timeout,
+            max_file_size=max_file_size,
+            max_output_size=max_output_size,
+            enabled=sandbox_enabled,
+        )
 
     return FilesystemAgent(
         client=client,
         deployment_name=deployment_name,
         data_root=data_root,
         sandbox=sandbox,
+        parallel_execution=parallel_execution,
+        max_concurrent_tools=max_concurrent_tools,
     )

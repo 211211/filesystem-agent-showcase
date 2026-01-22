@@ -220,20 +220,59 @@ class SandboxExecutor:
 
         return False
 
-    def _check_file_size_for_cat(self, command: list[str], sanitized: list[str]) -> None:
+    def get_file_size(self, file_path: Path) -> int:
+        """
+        Get file size in bytes.
+
+        Args:
+            file_path: Path to the file (can be relative to root_path or absolute)
+
+        Returns:
+            File size in bytes
+
+        Raises:
+            FileNotFoundError: If the file does not exist
+        """
+        # Resolve relative paths
+        if not file_path.is_absolute():
+            resolved = self.root_path / file_path
+        else:
+            resolved = file_path
+
+        resolved = resolved.resolve()
+
+        if not resolved.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        if not resolved.is_file():
+            raise ValueError(f"Path is not a file: {file_path}")
+
+        return resolved.stat().st_size
+
+    def _check_file_size_for_cat(
+        self,
+        command: list[str],
+        sanitized: list[str],
+        raise_error: bool = True
+    ) -> Optional[int]:
         """
         Check file sizes for cat commands to prevent reading huge files.
 
         Args:
             command: Original command
             sanitized: Sanitized command with resolved paths
+            raise_error: If True, raises FileTooLargeError; if False, returns the size
+
+        Returns:
+            If raise_error is False and file exceeds limit, returns file size.
+            Otherwise returns None.
 
         Raises:
-            FileTooLargeError: If any file exceeds the maximum size
+            FileTooLargeError: If any file exceeds the maximum size (when raise_error=True)
         """
         cmd_name = Path(command[0]).name
         if cmd_name != "cat":
-            return
+            return None
 
         # Check each file argument
         for arg in sanitized[1:]:
@@ -244,7 +283,12 @@ class SandboxExecutor:
             if file_path.is_file():
                 file_size = file_path.stat().st_size
                 if file_size > self.max_file_size:
-                    raise FileTooLargeError(file_path, file_size, self.max_file_size)
+                    if raise_error:
+                        raise FileTooLargeError(file_path, file_size, self.max_file_size)
+                    else:
+                        return file_size
+
+        return None
 
     def sanitize_command(self, command: list[str]) -> list[str]:
         """
