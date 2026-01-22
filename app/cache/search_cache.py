@@ -9,13 +9,35 @@ key generation and tracks file state to automatically invalidate stale results.
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 from app.cache.disk_cache import PersistentCache
-from app.cache.file_state import FileStateTracker
+from app.cache.file_state import FileState, FileStateTracker
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of files to track per scope to avoid performance issues
+MAX_TRACKED_FILES = 500
+
+
+@dataclass
+class ScopedSearchResult:
+    """
+    Cached search result with file state tracking.
+
+    Stores both the search result and the state of all files in the search scope
+    at the time the result was cached. This enables accurate cache invalidation
+    when any file in the scope changes.
+
+    Attributes:
+        result: The search result string
+        file_states: Dictionary mapping file paths to their state tuples (mtime, size, hash)
+    """
+
+    result: str
+    file_states: Dict[str, Tuple[float, int, Optional[str]]]
 
 
 class SearchCache:
@@ -57,17 +79,24 @@ class SearchCache:
         ... )
     """
 
-    def __init__(self, disk_cache: PersistentCache, state_tracker: FileStateTracker):
+    def __init__(
+        self,
+        disk_cache: PersistentCache,
+        state_tracker: FileStateTracker,
+        default_ttl: float = 300,
+    ):
         """
         Initialize the search cache.
 
         Args:
             disk_cache: PersistentCache instance for storing search results
             state_tracker: FileStateTracker for detecting file changes
+            default_ttl: Default time-to-live in seconds for cache entries (default: 300)
         """
         self._cache = disk_cache
         self._tracker = state_tracker
         self._search_prefix = "_search:"
+        self._default_ttl = default_ttl
 
     def _make_key(
         self,
@@ -153,25 +182,34 @@ class SearchCache:
         """
         key = self._make_key(operation, pattern, scope, options)
 
-        # Check if any file in scope has changed
-        if await self._is_scope_stale(scope):
-            await self._cache.delete(key)
-            logger.debug(
-                f"Cache MISS (stale): {operation} pattern={pattern} scope={scope}"
-            )
-            return None
-
-        result = await self._cache.get(key)
-        if result is not None:
-            logger.debug(
-                f"Cache HIT: {operation} pattern={pattern} scope={scope}"
-            )
-        else:
+        # Get cached entry
+        cached = await self._cache.get(key)
+        if cached is None:
             logger.debug(
                 f"Cache MISS: {operation} pattern={pattern} scope={scope}"
             )
+            return None
 
-        return result
+        # Handle ScopedSearchResult with file state tracking
+        if isinstance(cached, ScopedSearchResult):
+            # Validate all tracked file states
+            if await self._is_scope_stale_detailed(scope, cached.file_states):
+                await self._cache.delete(key)
+                logger.debug(
+                    f"Cache MISS (stale - file changed): {operation} pattern={pattern} scope={scope}"
+                )
+                return None
+            logger.debug(
+                f"Cache HIT: {operation} pattern={pattern} scope={scope}"
+            )
+            return cached.result
+
+        # Legacy cache entry without file tracking - treat as stale
+        logger.debug(
+            f"Cache MISS (legacy entry): {operation} pattern={pattern} scope={scope}"
+        )
+        await self._cache.delete(key)
+        return None
 
     async def set_search_result(
         self,
@@ -180,13 +218,13 @@ class SearchCache:
         scope: Path,
         options: dict,
         result: str,
-        ttl: float = 300,  # 5 minutes default
+        ttl: Optional[float] = None,
     ) -> None:
         """
         Cache search result with TTL and scope state tracking.
 
         Stores the search result in the cache with an expiration time and records
-        the current state of the search scope for future staleness detection.
+        the current state of all files in the search scope for future staleness detection.
 
         Args:
             operation: Type of search operation (e.g., "grep", "find")
@@ -194,7 +232,7 @@ class SearchCache:
             scope: Directory or file path that was searched
             options: Search options used in the search
             result: Search result string to cache
-            ttl: Time-to-live in seconds (default: 300 seconds / 5 minutes)
+            ttl: Time-to-live in seconds (default: uses self._default_ttl)
 
         Example:
             >>> await search_cache.set_search_result(
@@ -211,11 +249,20 @@ class SearchCache:
             will be refreshed periodically to account for potential missed changes.
         """
         key = self._make_key(operation, pattern, scope, options)
-        await self._cache.set(key, result, expire=ttl)
-        await self._update_scope_state(scope)
+
+        # Collect file states for all files in scope
+        file_states = await self._collect_file_states(scope)
+
+        # Store as ScopedSearchResult
+        entry = ScopedSearchResult(result=result, file_states=file_states)
+
+        # Use effective TTL: provided ttl or default
+        effective_ttl = ttl if ttl is not None else self._default_ttl
+        await self._cache.set(key, entry, expire=effective_ttl)
 
         logger.debug(
-            f"Cache SET: {operation} pattern={pattern} scope={scope} ttl={ttl}s"
+            f"Cache SET: {operation} pattern={pattern} scope={scope} "
+            f"files={len(file_states)} ttl={effective_ttl}s"
         )
 
     async def _is_scope_stale(self, scope: Path) -> bool:
@@ -254,6 +301,140 @@ class SearchCache:
             scope: Directory or file path to track
         """
         await self._tracker.update_state(scope)
+
+    async def _collect_file_states(
+        self, scope: Path
+    ) -> Dict[str, Tuple[float, int, Optional[str]]]:
+        """
+        Collect current state of all files in scope.
+
+        Gathers mtime, size, and content hash for each file in the search scope.
+        For directories, recursively collects states for all contained files.
+
+        Args:
+            scope: Directory or file path to collect states from
+
+        Returns:
+            Dictionary mapping file paths to state tuples (mtime, size, content_hash)
+
+        Note:
+            - Limited to MAX_TRACKED_FILES (500) files to avoid performance issues
+            - Logs a warning if scope has too many files
+            - Inaccessible files are skipped with a debug log
+        """
+        file_states: Dict[str, Tuple[float, int, Optional[str]]] = {}
+
+        if scope.is_file():
+            try:
+                state = FileState.from_path(scope, hash_content=True)
+                file_states[str(scope.resolve())] = (
+                    state.mtime,
+                    state.size,
+                    state.content_hash,
+                )
+            except (OSError, IOError) as e:
+                logger.debug(f"Failed to collect state for {scope}: {e}")
+            return file_states
+
+        # Recursively collect file states for directories
+        file_count = 0
+        try:
+            for file_path in scope.rglob("*"):
+                if file_count >= MAX_TRACKED_FILES:
+                    logger.warning(
+                        f"Scope {scope} has more than {MAX_TRACKED_FILES} files. "
+                        f"Tracking only the first {MAX_TRACKED_FILES} files. "
+                        "Consider using a more specific search scope."
+                    )
+                    break
+
+                if file_path.is_file():
+                    try:
+                        state = FileState.from_path(file_path, hash_content=True)
+                        file_states[str(file_path.resolve())] = (
+                            state.mtime,
+                            state.size,
+                            state.content_hash,
+                        )
+                        file_count += 1
+                    except (OSError, IOError) as e:
+                        logger.debug(f"Failed to collect state for {file_path}: {e}")
+        except (OSError, IOError) as e:
+            logger.debug(f"Failed to traverse scope {scope}: {e}")
+
+        return file_states
+
+    async def _is_scope_stale_detailed(
+        self,
+        scope: Path,
+        cached_states: Dict[str, Tuple[float, int, Optional[str]]],
+    ) -> bool:
+        """
+        Check if any file in scope has changed since caching.
+
+        Compares the current state of files in the scope against cached states
+        to detect additions, deletions, or modifications.
+
+        Args:
+            scope: Directory or file path to check
+            cached_states: Dictionary of cached file states from ScopedSearchResult
+
+        Returns:
+            True if any file has changed (added, deleted, or modified), False otherwise
+        """
+        current_files: set[str] = set()
+
+        if scope.is_file():
+            current_files.add(str(scope.resolve()))
+        else:
+            try:
+                file_count = 0
+                for file_path in scope.rglob("*"):
+                    if file_count >= MAX_TRACKED_FILES:
+                        # If we hit the limit, check if cached also hit it
+                        # If cached has fewer files, scope has grown - stale
+                        if len(cached_states) < MAX_TRACKED_FILES:
+                            return True
+                        break
+
+                    if file_path.is_file():
+                        current_files.add(str(file_path.resolve()))
+                        file_count += 1
+            except (OSError, IOError) as e:
+                logger.debug(f"Failed to traverse scope {scope}: {e}")
+                return True  # Consider stale on error
+
+        cached_files = set(cached_states.keys())
+
+        # Check for added or deleted files
+        if current_files != cached_files:
+            logger.debug(
+                f"Scope {scope} stale: file set changed. "
+                f"Added: {current_files - cached_files}, "
+                f"Deleted: {cached_files - current_files}"
+            )
+            return True
+
+        # Check each file for content changes
+        for file_path_str, (mtime, size, content_hash) in cached_states.items():
+            file_path = Path(file_path_str)
+            try:
+                current_state = FileState.from_path(file_path, hash_content=True)
+                if (
+                    current_state.mtime != mtime
+                    or current_state.size != size
+                    or current_state.content_hash != content_hash
+                ):
+                    logger.debug(f"Scope {scope} stale: file {file_path} changed")
+                    return True
+            except FileNotFoundError:
+                logger.debug(f"Scope {scope} stale: file {file_path} was deleted")
+                return True
+            except (OSError, IOError) as e:
+                logger.debug(f"Failed to check state for {file_path}: {e}")
+                return True  # Consider stale on error
+
+        return False
 
     async def invalidate_pattern(
         self,

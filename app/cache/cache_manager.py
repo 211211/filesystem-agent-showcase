@@ -106,16 +106,18 @@ class CacheManager:
         # Initialize file state tracker for change detection
         self.file_state_tracker = FileStateTracker(self.persistent_cache)
 
-        # Initialize content cache with file state tracking
+        # Initialize content cache with file state tracking and TTL
         self.content_cache = ContentCache(
             disk_cache=self.persistent_cache,
             state_tracker=self.file_state_tracker,
+            default_ttl=content_ttl,
         )
 
-        # Initialize search cache with scope-aware invalidation
+        # Initialize search cache with scope-aware invalidation and TTL
         self.search_cache = SearchCache(
             disk_cache=self.persistent_cache,
             state_tracker=self.file_state_tracker,
+            default_ttl=search_ttl,
         )
 
         # Store TTL settings for reference

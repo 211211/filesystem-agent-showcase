@@ -139,7 +139,7 @@ class FilesystemAgent:
         try:
             # If new cache manager is available, use cached versions for read/search operations
             if self.cache_manager is not None:
-                if tool_call.name in ("cat", "head"):
+                if tool_call.name in ("cat", "head", "tail"):
                     return await self._cached_read_file(tool_call)
                 elif tool_call.name in ("grep", "find"):
                     return await self._cached_search(tool_call)
@@ -170,12 +170,17 @@ class FilesystemAgent:
         """
         Execute a file read operation with caching.
 
-        This method uses the CacheManager's ContentCache to cache file contents,
-        avoiding repeated disk reads. The cache automatically detects when files
-        have changed and invalidates stale entries.
+        This method uses the CacheManager's ContentCache to cache FULL file contents,
+        avoiding repeated disk reads. For operations like head/tail, the full content
+        is cached and then sliced per request. This ensures that:
+        - head -n 10 doesn't poison the cache for subsequent cat operations
+        - Different head/tail line counts work correctly from the same cached content
+
+        The cache automatically detects when files have changed and invalidates
+        stale entries.
 
         Args:
-            tool_call: The tool call to execute (cat or head)
+            tool_call: The tool call to execute (cat, head, or tail)
 
         Returns:
             The execution result with cached or fresh content
@@ -184,23 +189,55 @@ class FilesystemAgent:
         file_path = (self.data_root / path_str).resolve()
 
         try:
-            # Define the loader function that reads from disk
-            async def load_file(p: Path) -> str:
-                # Build and execute the command normally
-                command = build_command(tool_call.name, tool_call.arguments)
+            # Define the loader function that reads FULL file content (always use cat)
+            async def load_full_file(p: Path) -> str:
+                # Always use cat to get full content, regardless of the original operation
+                command = build_command("cat", {"path": path_str})
                 result = await self.sandbox.execute(command)
                 if result.success:
                     return result.stdout
                 else:
                     raise Exception(f"Failed to read file: {result.stderr}")
 
-            # Get content from cache or load fresh
-            content = await self.cache_manager.content_cache.get_content(
+            # Get FULL content from cache (TTL from cache_manager settings)
+            full_content = await self.cache_manager.content_cache.get_content(
                 file_path,
-                load_file
+                load_full_file
             )
 
-            # Build command string for logging
+            # Apply operation-specific processing AFTER cache retrieval
+            if tool_call.name == "head":
+                lines = tool_call.arguments.get("lines", 10)
+                # Split by newlines and take first N lines
+                content_lines = full_content.split("\n")
+                # Handle files without final newline: split produces empty string at end if file ends with \n
+                # If file has 10 lines ending with \n, split gives 11 elements (last is empty)
+                # We want to preserve the original behavior of head command
+                sliced_lines = content_lines[:lines]
+                content = "\n".join(sliced_lines)
+                # Add trailing newline if original content had one and we're not returning empty content
+                if full_content and full_content.endswith("\n") and content and not content.endswith("\n"):
+                    content += "\n"
+            elif tool_call.name == "tail":
+                lines = tool_call.arguments.get("lines", 10)
+                # Split by newlines and take last N lines
+                content_lines = full_content.split("\n")
+                # Handle trailing newline: remove empty string at end before slicing
+                if content_lines and content_lines[-1] == "" and full_content.endswith("\n"):
+                    content_lines = content_lines[:-1]
+                    sliced_lines = content_lines[-lines:]
+                    content = "\n".join(sliced_lines)
+                    # Add trailing newline back
+                    if content:
+                        content += "\n"
+                else:
+                    sliced_lines = content_lines[-lines:]
+                    content = "\n".join(sliced_lines)
+            else:
+                # cat or any other operation - return full content
+                content = full_content
+
+            # Build command string for logging (use original tool name for accurate logging)
             command = build_command(tool_call.name, tool_call.arguments)
 
             return ExecutionResult(

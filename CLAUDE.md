@@ -275,3 +275,46 @@ When testing cache functionality:
 3. Implement `build_command()` case in `bash_tools.py`
 4. Add tests in `tests/test_tools.py`
 5. Consider if the tool should be cached (update `_execute_tool()` in `filesystem_agent.py` if needed)
+
+## Development Guidelines
+
+### Parallel Execution Strategy
+
+When working on this codebase, **always prefer parallel execution** to speed up development:
+
+1. **Multi-file changes**: When modifying multiple independent files, spawn parallel agents for each file or logical group
+2. **Testing**: Run tests in parallel with independent test files
+3. **Code review tasks**: Analyze multiple components simultaneously
+4. **Refactoring**: Apply similar changes across files concurrently
+
+**Example parallel task breakdown:**
+```
+Task: Implement cache fixes F1-F4
+
+Spawn in parallel:
+├── Agent 1: F1 fix (content_cache.py + filesystem_agent.py)
+├── Agent 2: F2 fix (search_cache.py - scope tracking)
+├── Agent 3: F3 fix (TTL application across cache_manager.py)
+└── Agent 4: F4 fix (path boundary in content_cache.py)
+```
+
+**When NOT to parallelize:**
+- Sequential dependencies (e.g., create file A before importing in file B)
+- Shared state modifications that could conflict
+- Database migrations or schema changes
+
+### Implementation Workflow
+
+For complex features:
+1. **Plan first**: Create implementation plan with clear task breakdown
+2. **Identify parallelizable work**: Group independent changes
+3. **Spawn agents**: Use Task tool with multiple parallel agents
+4. **Integrate**: Merge results and run integration tests
+5. **Validate**: Run full test suite
+
+### Code Quality Standards
+
+- All new code must have corresponding tests
+- Maintain >80% test coverage for cache modules
+- Follow existing code style (ruff formatting)
+- Update documentation for API changes

@@ -19,16 +19,21 @@ async def temp_dir():
 
 
 @pytest.fixture
-async def cache_components(temp_dir):
-    """Create cache components for testing."""
-    cache_dir = temp_dir / "cache"
-    cache = PersistentCache(cache_dir=str(cache_dir), size_limit=1024 * 1024)  # 1MB
-    tracker = FileStateTracker(cache)
-    search_cache = SearchCache(cache, tracker)
+async def cache_components():
+    """Create cache components for testing.
 
-    yield search_cache, cache, tracker
+    Note: Cache directory must be SEPARATE from the search scope directory
+    to avoid F2's file state tracking from detecting cache file changes.
+    """
+    with tempfile.TemporaryDirectory() as cache_tmpdir:
+        cache_dir = Path(cache_tmpdir) / "cache"
+        cache = PersistentCache(cache_dir=str(cache_dir), size_limit=1024 * 1024)  # 1MB
+        tracker = FileStateTracker(cache)
+        search_cache = SearchCache(cache, tracker)
 
-    cache.close()
+        yield search_cache, cache, tracker
+
+        cache.close()
 
 
 @pytest.fixture
