@@ -235,8 +235,8 @@ class TestCachingIntegration:
     @pytest.mark.asyncio
     async def test_cache_invalidation_by_path(self, cached_sandbox, temp_data_dir):
         """Test that cache entries can be invalidated by path."""
-        # Populate cache
-        await cached_sandbox.execute(["cat", "small.txt"])
+        # Populate cache (use ./ prefix for proper path recognition)
+        await cached_sandbox.execute(["cat", "./small.txt"])
         await cached_sandbox.execute(["ls", "."])
 
         # Verify entries are cached
@@ -244,7 +244,7 @@ class TestCachingIntegration:
         assert stats1["size"] == 2
 
         # Invalidate entries for small.txt
-        invalidated = cached_sandbox.invalidate_path("small.txt")
+        invalidated = cached_sandbox.invalidate_path("./small.txt")
 
         assert invalidated == 1
 

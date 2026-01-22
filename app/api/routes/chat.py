@@ -72,9 +72,16 @@ def get_agent(settings: Settings = Depends(get_settings)) -> FilesystemAgent:
         max_output_size=settings.max_output_size,
         parallel_execution=settings.parallel_execution,
         max_concurrent_tools=settings.max_concurrent_tools,
+        # Legacy cache settings (v2.0)
         cache_enabled=settings.cache_enabled,
         cache_ttl=settings.cache_ttl,
         cache_max_size=settings.cache_max_size,
+        # New cache settings (v3.0)
+        use_new_cache=settings.use_new_cache,
+        cache_directory=settings.cache_directory,
+        cache_size_limit=settings.cache_size_limit,
+        cache_content_ttl=settings.cache_content_ttl,
+        cache_search_ttl=settings.cache_search_ttl,
     )
 
 

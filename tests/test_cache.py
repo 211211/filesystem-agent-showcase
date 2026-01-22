@@ -258,8 +258,8 @@ class TestPathInvalidation:
 
     def test_invalidate_single_path(self, cache):
         """Test invalidating entries for a single path."""
-        # Add entries for different files
-        for filename in ["test.txt", "other.txt", "data.txt"]:
+        # Add entries for different files (using relative paths with ./)
+        for filename in ["./test.txt", "./other.txt", "./data.txt"]:
             result = ExecutionResult(
                 success=True,
                 stdout=f"content of {filename}",
@@ -270,20 +270,20 @@ class TestPathInvalidation:
             cache.set(["cat", filename], result)
 
         # Verify all are cached
-        assert cache.get(["cat", "test.txt"]) is not None
-        assert cache.get(["cat", "other.txt"]) is not None
+        assert cache.get(["cat", "./test.txt"]) is not None
+        assert cache.get(["cat", "./other.txt"]) is not None
 
         # Invalidate entries for test.txt
-        count = cache.invalidate_path("test.txt")
+        count = cache.invalidate_path("./test.txt")
 
         # Should have invalidated 1 entry
         assert count == 1
 
         # test.txt entry should be gone
-        assert cache.get(["cat", "test.txt"]) is None
+        assert cache.get(["cat", "./test.txt"]) is None
 
         # Other entries should still be present
-        assert cache.get(["cat", "other.txt"]) is not None
+        assert cache.get(["cat", "./other.txt"]) is not None
 
     def test_invalidate_partial_path_match(self, cache):
         """Test that invalidation matches partial paths."""
@@ -320,6 +320,138 @@ class TestPathInvalidation:
 
         # Original entry should still be present
         assert cache.get(["cat", "test.txt"]) is not None
+
+    def test_invalidate_no_false_positives_substring(self, cache):
+        """
+        Test that invalidation does NOT use substring matching.
+
+        This is the C5 fix - /data should NOT match /database.
+        """
+        # Add entries that would be false positives with substring matching
+        false_positive_paths = [
+            "./database/config.txt",    # Contains "data" as substring
+            "./metadata/info.json",      # Contains "data" as substring
+            "./mydata.txt",              # Contains "data" as substring
+            "./update/log.txt",          # Contains "data" as substring
+        ]
+
+        for path in false_positive_paths:
+            result = ExecutionResult(
+                success=True,
+                stdout=f"content of {path}",
+                stderr="",
+                return_code=0,
+                command=f"cat {path}",
+            )
+            cache.set(["cat", path], result)
+
+        # Also add an entry that SHOULD be invalidated
+        result = ExecutionResult(
+            success=True,
+            stdout="actual data file",
+            stderr="",
+            return_code=0,
+            command="cat ./data/file.txt",
+        )
+        cache.set(["cat", "./data/file.txt"], result)
+
+        # Invalidate "./data" - should NOT match database, metadata, etc.
+        count = cache.invalidate_path("./data")
+
+        # Only the actual data/ file should be invalidated
+        assert count == 1, (
+            f"Expected 1 invalidation, got {count}. "
+            f"False positives detected!"
+        )
+
+        # False positive entries should still be present
+        for path in false_positive_paths:
+            assert cache.get(["cat", path]) is not None, (
+                f"False positive: {path} was incorrectly invalidated by './data'"
+            )
+
+        # Actual data file should be invalidated
+        assert cache.get(["cat", "./data/file.txt"]) is None
+
+    def test_invalidate_similar_directory_names(self, cache):
+        """
+        Test that directories with similar names are properly distinguished.
+
+        /tmp should not match /template, /temp should not match /temporary.
+        """
+        paths_and_targets = [
+            # (path to cache, path to invalidate, should_be_invalidated)
+            ("./tmp/file.txt", "./tmp", True),
+            ("./template/index.html", "./tmp", False),
+            ("./temp/cache.dat", "./temp", True),
+            ("./temporary/data.bin", "./temp", False),
+            ("./logs/app.log", "./log", False),  # "log" != "logs"
+            ("./log/error.log", "./log", True),
+        ]
+
+        for path, _, _ in paths_and_targets:
+            result = ExecutionResult(
+                success=True,
+                stdout=f"content of {path}",
+                stderr="",
+                return_code=0,
+                command=f"cat {path}",
+            )
+            cache.set(["cat", path], result)
+
+        # Test each invalidation scenario
+        invalidated_paths = set()
+        for path, target, should_invalidate in paths_and_targets:
+            # Clear and repopulate for each test
+            cache.clear()
+            for p, _, _ in paths_and_targets:
+                result = ExecutionResult(
+                    success=True,
+                    stdout=f"content of {p}",
+                    stderr="",
+                    return_code=0,
+                    command=f"cat {p}",
+                )
+                cache.set(["cat", p], result)
+
+            cache.invalidate_path(target)
+            was_invalidated = cache.get(["cat", path]) is None
+
+            if should_invalidate:
+                assert was_invalidated, (
+                    f"Path '{path}' should have been invalidated by '{target}'"
+                )
+            else:
+                assert not was_invalidated, (
+                    f"Path '{path}' should NOT have been invalidated by '{target}'"
+                )
+
+    def test_invalidate_grep_pattern_not_treated_as_path(self, cache):
+        """
+        Test that grep patterns are not treated as paths.
+
+        'grep ERROR file.txt' - 'ERROR' should not be treated as a path.
+        """
+        result = ExecutionResult(
+            success=True,
+            stdout="Error log line",
+            stderr="",
+            return_code=0,
+            command="grep ERROR ./logs/app.log",
+        )
+        cache.set(["grep", "ERROR", "./logs/app.log"], result)
+
+        # Invalidating "ERROR" (grep pattern) should not match anything
+        count = cache.invalidate_path("ERROR")
+        assert count == 0, "Grep pattern 'ERROR' should not be treated as a path"
+
+        # Entry should still be present
+        assert cache.get(["grep", "ERROR", "./logs/app.log"]) is not None
+
+        # But invalidating the actual path should work
+        count = cache.invalidate_path("./logs/app.log")
+        assert count == 1
+        assert cache.get(["grep", "ERROR", "./logs/app.log"]) is None
 
 
 class TestClearFunctionality:

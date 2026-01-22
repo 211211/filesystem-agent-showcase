@@ -4,6 +4,7 @@ Provides caching functionality to avoid duplicate command executions.
 """
 
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional, List, Dict, TYPE_CHECKING
 import hashlib
 import json
@@ -150,12 +151,63 @@ class ToolResultCache:
                 'last_accessed': now,
             }
 
+    def _is_path_related(self, target_path: Path, arg: str) -> bool:
+        """
+        Check if an argument path should be invalidated when target_path changes.
+
+        Uses proper path boundary checking instead of substring matching to avoid
+        false positives like '/data' matching '/database'.
+
+        Invalidation rules:
+        - If target is a file: invalidate commands that reference that exact file
+        - If target is a directory: invalidate commands referencing files under it
+
+        Args:
+            target_path: The resolved target path that changed
+            arg: The command argument to check
+
+        Returns:
+            True if the cached command should be invalidated
+        """
+        try:
+            arg_path = Path(arg)
+            # Try to resolve if it looks like a path (has separators or is relative)
+            if '/' in arg or arg.startswith('.'):
+                arg_path = arg_path.resolve()
+            else:
+                # Single word args are likely not paths (e.g., grep patterns)
+                return False
+
+            # Check if paths are equal (exact match)
+            if arg_path == target_path:
+                return True
+
+            # Check if arg_path is under target_path (target is a parent directory)
+            # Example: invalidating ./data/ should invalidate ./data/file.txt
+            try:
+                arg_path.relative_to(target_path)
+                return True
+            except ValueError:
+                pass
+
+            # NOTE: We intentionally do NOT check if target_path is under arg_path
+            # Invalidating a specific file should NOT invalidate commands on parent dirs
+            # Example: invalidating ./data/file.txt should NOT invalidate ls ./data/
+
+            return False
+        except (OSError, ValueError):
+            # Not a valid path, skip
+            return False
+
     def invalidate_path(self, path: str) -> int:
         """
         Invalidate all cache entries related to a path.
 
         This is useful when a file might have been modified and cached
         results for commands involving that file should be cleared.
+
+        Uses proper path boundary checking to avoid false positives.
+        For example, invalidating '/data' will NOT invalidate '/database'.
 
         Args:
             path: The path to invalidate entries for
@@ -164,15 +216,19 @@ class ToolResultCache:
             Number of entries invalidated
         """
         invalidated_count = 0
+        target_path = Path(path).resolve()
 
         with self._lock:
             keys_to_remove = []
 
             for key, entry in self.cache.items():
                 command = entry.get('command', [])
-                # Check if the path appears in any of the command arguments
-                if any(path in str(arg) for arg in command):
-                    keys_to_remove.append(key)
+                # Check if any command argument is a related path
+                # Skip first element (command name like 'grep', 'cat', etc.)
+                for arg in command[1:]:
+                    if self._is_path_related(target_path, str(arg)):
+                        keys_to_remove.append(key)
+                        break
 
             for key in keys_to_remove:
                 del self.cache[key]

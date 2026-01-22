@@ -148,15 +148,15 @@ class TestCacheInvalidation:
     @pytest.mark.asyncio
     async def test_invalidate_path(self, cached_executor):
         """Test that path invalidation works."""
-        # Execute command to cache it
-        command = ["cat", "test.txt"]
+        # Execute command to cache it (use ./ prefix for proper path recognition)
+        command = ["cat", "./test.txt"]
         await cached_executor.execute(command)
 
         stats = cached_executor.cache_stats()
         assert stats['size'] == 1
 
         # Invalidate the path
-        count = cached_executor.invalidate_path("test.txt")
+        count = cached_executor.invalidate_path("./test.txt")
         assert count == 1
 
         # Cache should be empty
@@ -166,15 +166,15 @@ class TestCacheInvalidation:
     @pytest.mark.asyncio
     async def test_invalidate_does_not_affect_other_paths(self, cached_executor):
         """Test that invalidation only affects matching paths."""
-        # Cache multiple commands
-        await cached_executor.execute(["cat", "test.txt"])
+        # Cache multiple commands (use ./ prefix for proper path recognition)
+        await cached_executor.execute(["cat", "./test.txt"])
         await cached_executor.execute(["ls", "."])
 
         stats = cached_executor.cache_stats()
         assert stats['size'] == 2
 
         # Invalidate only test.txt
-        cached_executor.invalidate_path("test.txt")
+        cached_executor.invalidate_path("./test.txt")
 
         stats = cached_executor.cache_stats()
         assert stats['size'] == 1

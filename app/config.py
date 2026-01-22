@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     cache_max_size: int = 100
 
     # Cache Manager Configuration (new unified cache system)
+    use_new_cache: bool = True  # Enable v3.0 multi-tier cache by default
     cache_directory: str = "tmp/cache"
     cache_size_limit: int = 500 * 1024 * 1024  # 500MB in bytes
     cache_content_ttl: float = 0  # No expiry for content (invalidate on file change)
