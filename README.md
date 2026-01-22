@@ -226,13 +226,14 @@ make test-cov
 The project supports both **Docker** and **Podman**. The Makefile auto-detects which container runtime is available (prefers Podman if both are installed).
 
 ```bash
-# Check detected container runtime
+# Check detected container runtime and available commands
 make help
 
-# Build and run
+# Build and run container
 make container
-# or use legacy alias
-make docker
+
+# Run in background (detached)
+make container-up
 
 # Development mode with hot reload
 make container-dev
@@ -242,17 +243,29 @@ make container-stop
 
 # View logs
 make container-logs
+
+# Open shell in running container
+make container-shell
+
+# Clean up container images
+make container-clean
 ```
 
-### Using Podman
+### Using Podman (Recommended)
 
-Podman is a daemonless container engine that's fully compatible with Docker. To use Podman:
+Podman is a daemonless, rootless container engine that's fully compatible with Docker.
 
 1. **Install Podman** (if not already installed):
    ```bash
    # macOS
-   brew install podman
-   podman machine init
+   brew install podman podman-compose
+
+   # Initialize and start Podman machine (macOS/Windows only)
+   make podman-init
+   make podman-start
+
+   # Or manually:
+   podman machine init --cpus 2 --memory 2048
    podman machine start
 
    # Fedora/RHEL
@@ -262,23 +275,44 @@ Podman is a daemonless container engine that's fully compatible with Docker. To 
    sudo apt install podman podman-compose
    ```
 
-2. **Run with Podman**:
+2. **Check Podman status**:
+   ```bash
+   make podman-status
+   ```
+
+3. **Run with Podman**:
    ```bash
    # The Makefile will automatically use podman if available
    make container
 
-   # Or run directly
-   podman build -t filesystem-agent-showcase .
+   # Or run directly with podman-compose
    podman-compose up
+
+   # Or with podman compose (built-in)
+   podman compose up
    ```
 
 ### Using Docker
 
 ```bash
 # Build and run with Docker
+docker compose up
+
+# Or build manually first
 docker build -t filesystem-agent-showcase .
 docker compose up
 ```
+
+### Compose File
+
+The project uses `compose.yml` which works with both Podman Compose and Docker Compose. Features include:
+
+- **Production service** (`filesystem-agent`): Optimized for production with read-only data mount
+- **Development service** (`filesystem-agent-dev`): Hot reload enabled, use with `--profile dev`
+- **Security**: `no-new-privileges` security option, non-root user
+- **Resource limits**: 512MB memory limit, 256MB reservation
+- **Health checks**: Automatic container health monitoring
+- **SELinux support**: `:Z` volume labels for SELinux compatibility
 
 ## Project Structure
 
@@ -302,7 +336,7 @@ filesystem-agent-showcase/
 ├── data/                       # Sample documents
 ├── tests/                      # Test suite
 ├── Dockerfile
-├── docker-compose.yml
+├── compose.yml                 # Podman/Docker Compose config
 ├── Makefile
 └── pyproject.toml
 ```

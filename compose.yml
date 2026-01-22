@@ -1,0 +1,77 @@
+# Filesystem Agent Showcase - Compose Configuration
+# Works with both Podman Compose and Docker Compose
+#
+# Usage:
+#   podman-compose up              # or: podman compose up
+#   docker compose up              # Docker alternative
+#
+# Development mode:
+#   podman-compose --profile dev up filesystem-agent-dev
+
+services:
+  filesystem-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: filesystem-agent-showcase:latest
+    container_name: filesystem-agent-showcase
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override specific settings for container
+      - DATA_ROOT_PATH=/app/data
+      - SANDBOX_ENABLED=true
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEBUG=false
+    volumes:
+      # Mount data directory for document persistence (read-only in production)
+      - ./data:/app/data:ro,Z
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    # Security settings (works with rootless Podman)
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  # Development service with hot reload
+  filesystem-agent-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: filesystem-agent-showcase:dev
+    container_name: filesystem-agent-dev
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DATA_ROOT_PATH=/app/data
+      - SANDBOX_ENABLED=true
+      - DEBUG=true
+    volumes:
+      # Mount source code for hot reload (Z flag for SELinux)
+      - ./app:/app/app:Z
+      - ./data:/app/data:Z
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    profiles:
+      - dev
+
+# Named volumes (optional, for persistent storage)
+volumes:
+  data:
+    driver: local
