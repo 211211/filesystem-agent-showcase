@@ -9,7 +9,7 @@ import tempfile
 import json
 
 from fastapi.testclient import TestClient
-from httpx import AsyncClient
+from httpx import AsyncClient, ASGITransport
 
 from app.agent.filesystem_agent import FilesystemAgent, ToolCall
 from app.sandbox.executor import SandboxExecutor, ExecutionResult
@@ -243,7 +243,7 @@ class TestChatStreamEndpoint:
             mock_agent.chat_stream = mock_chat_stream
             mock_create_agent.return_value = mock_agent
 
-            async with AsyncClient(app=app, base_url="http://test") as client:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 response = await client.post(
                     "/api/chat/stream",
                     json={"message": "Hello"},
@@ -291,7 +291,7 @@ class TestChatStreamEndpoint:
             mock_agent.chat_stream = mock_chat_stream
             mock_create_agent.return_value = mock_agent
 
-            async with AsyncClient(app=app, base_url="http://test") as client:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 response = await client.post(
                     "/api/chat/stream",
                     json={"message": "Hello"},

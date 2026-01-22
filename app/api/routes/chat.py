@@ -2,6 +2,7 @@
 Chat API routes for the Filesystem Agent.
 """
 
+import asyncio
 import json
 import uuid
 import logging
@@ -20,6 +21,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 # In-memory session storage (use Redis/DB in production)
 _sessions: dict[str, list[dict]] = {}
+_sessions_lock = asyncio.Lock()  # Protects concurrent access to _sessions
 
 
 class ChatRequest(BaseModel):
@@ -96,24 +98,27 @@ async def chat(
     try:
         # Get or create session
         session_id = request.session_id or str(uuid.uuid4())
-        history = _sessions.get(session_id, [])
+
+        # Read session history with lock (copy to avoid holding lock during agent call)
+        async with _sessions_lock:
+            history = _sessions.get(session_id, []).copy()
 
         logger.info(f"Processing chat request for session {session_id}")
 
-        # Get agent response
+        # Get agent response (long-running, don't hold lock)
         response = await agent.chat(
             user_message=request.message,
             history=history,
         )
 
-        # Update session history
-        history.append({"role": "user", "content": request.message})
-        history.append({"role": "assistant", "content": response.message})
-        _sessions[session_id] = history
-
-        # Limit session history to prevent memory issues
-        if len(_sessions[session_id]) > 50:
-            _sessions[session_id] = _sessions[session_id][-50:]
+        # Update session history with lock
+        async with _sessions_lock:
+            # Re-read current state and merge (handles concurrent updates)
+            current_history = _sessions.get(session_id, [])
+            current_history.append({"role": "user", "content": request.message})
+            current_history.append({"role": "assistant", "content": response.message})
+            # Limit session history to prevent memory issues
+            _sessions[session_id] = current_history[-50:]
 
         return ChatResponse(
             response=response.message,
@@ -144,17 +149,20 @@ async def chat(
 @router.delete("/sessions/{session_id}")
 async def clear_session(session_id: str):
     """Clear a chat session's history."""
-    if session_id in _sessions:
-        del _sessions[session_id]
-        return {"message": f"Session {session_id} cleared"}
+    async with _sessions_lock:
+        if session_id in _sessions:
+            del _sessions[session_id]
+            return {"message": f"Session {session_id} cleared"}
     raise HTTPException(status_code=404, detail="Session not found")
 
 
 @router.get("/sessions/{session_id}/history")
 async def get_session_history(session_id: str):
     """Get the chat history for a session."""
-    if session_id in _sessions:
-        return {"session_id": session_id, "history": _sessions[session_id]}
+    async with _sessions_lock:
+        if session_id in _sessions:
+            # Return a copy to prevent external modification
+            return {"session_id": session_id, "history": _sessions[session_id].copy()}
     raise HTTPException(status_code=404, detail="Session not found")
 
 
@@ -184,9 +192,12 @@ async def sse_event_generator(
 
             # Update session history on done event
             if event_type == "done":
-                history.append({"role": "user", "content": message})
-                history.append({"role": "assistant", "content": event_data.get("message", "")})
-                _sessions[session_id] = history[-50:]  # Limit history
+                async with _sessions_lock:
+                    # Re-read current state and merge (handles concurrent updates)
+                    current_history = _sessions.get(session_id, [])
+                    current_history.append({"role": "user", "content": message})
+                    current_history.append({"role": "assistant", "content": event_data.get("message", "")})
+                    _sessions[session_id] = current_history[-50:]  # Limit history
 
     except Exception as e:
         logger.exception(f"Error in SSE generator: {e}")
@@ -279,7 +290,10 @@ async def chat_stream(
     try:
         # Get or create session
         session_id = request.session_id or str(uuid.uuid4())
-        history = _sessions.get(session_id, [])
+
+        # Read session history with lock (copy to avoid holding lock during streaming)
+        async with _sessions_lock:
+            history = _sessions.get(session_id, []).copy()
 
         logger.info(f"Starting streaming chat for session {session_id}")
 
