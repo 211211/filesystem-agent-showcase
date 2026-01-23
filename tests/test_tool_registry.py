@@ -405,9 +405,9 @@ class TestCreateDefaultRegistry:
         """Test that default registry contains all expected tools"""
         registry = create_default_registry()
 
-        expected_tools = ["grep", "find", "cat", "head", "tail", "ls", "wc"]
+        expected_tools = ["grep", "find", "cat", "head", "tail", "preview", "ls", "wc"]
 
-        assert len(registry) == 7
+        assert len(registry) == 8
         for tool_name in expected_tools:
             assert tool_name in registry
 
@@ -532,7 +532,7 @@ class TestCreateDefaultRegistry:
         registry = create_default_registry()
         openai_format = registry.to_openai_format()
 
-        assert len(openai_format) == 7
+        assert len(openai_format) == 8  # Including preview tool
 
         for tool_def in openai_format:
             # Check basic structure

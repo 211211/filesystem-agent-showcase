@@ -10,8 +10,10 @@ from typing import Any, Optional
 
 from diskcache import Cache
 
+from app.interfaces.cache import ICacheBackend
 
-class PersistentCache:
+
+class PersistentCache(ICacheBackend):
     """Persistent cache using DiskCache with async support.
 
     This class provides an async-safe interface to DiskCache, using asyncio.Lock

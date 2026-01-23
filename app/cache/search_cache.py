@@ -15,6 +15,7 @@ from typing import Dict, Optional, Tuple
 
 from app.cache.disk_cache import PersistentCache
 from app.cache.file_state import FileState, FileStateTracker
+from app.interfaces.cache import ISearchCache
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,11 @@ class ScopedSearchResult:
     file_states: Dict[str, Tuple[float, int, Optional[str]]]
 
 
-class SearchCache:
+class SearchCache(ISearchCache):
     """
     Cache search results with scope-aware invalidation.
+
+    Implements the ISearchCache interface.
 
     This class provides caching for search operations (grep, find, etc.) with automatic
     invalidation when files in the search scope change. Cache keys are deterministically

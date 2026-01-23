@@ -16,6 +16,7 @@ from app.exceptions import (
     TimeoutException,
     ExecutionException,
 )
+from app.interfaces.executor import IExecutor
 
 
 # Whitelisted commands that can be executed
@@ -92,9 +93,11 @@ class ExecutionResult:
         }
 
 
-class SandboxExecutor:
+class SandboxExecutor(IExecutor):
     """
     Executes shell commands within a sandboxed environment.
+
+    Implements the IExecutor interface with comprehensive security features.
 
     Security features:
     - Only allows whitelisted commands
@@ -123,15 +126,25 @@ class SandboxExecutor:
             max_file_size: Maximum file size for cat operations in bytes (default: 10MB)
             enabled: If False, sandbox checks are bypassed (for testing only)
         """
-        self.root_path = root_path.resolve()
-        self.timeout = timeout
+        self._root_path = root_path.resolve()
+        self._timeout = timeout
         self.max_output_size = max_output_size
         self.max_file_size = max_file_size
         self.enabled = enabled
 
         # Ensure root path exists
-        if not self.root_path.exists():
-            self.root_path.mkdir(parents=True, exist_ok=True)
+        if not self._root_path.exists():
+            self._root_path.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def root_path(self) -> Path:
+        """Get the root path for command execution."""
+        return self._root_path
+
+    @property
+    def timeout(self) -> int:
+        """Get the execution timeout in seconds."""
+        return self._timeout
 
     def validate_command(self, command: list[str]) -> None:
         """

@@ -7,6 +7,8 @@ registration, lookup, and command building for bash tools used by the agent.
 from dataclasses import dataclass, field
 from typing import Dict, List, Callable, Optional, Any
 
+from app.interfaces.registry import IToolRegistry
+
 
 @dataclass
 class ToolParameter:
@@ -63,8 +65,11 @@ class ToolDefinition:
         }
 
 
-class ToolRegistry:
-    """Registry to manage tool definitions"""
+class ToolRegistry(IToolRegistry):
+    """Registry to manage tool definitions.
+
+    Implements the IToolRegistry interface.
+    """
 
     def __init__(self):
         self._tools: Dict[str, ToolDefinition] = {}
@@ -202,6 +207,19 @@ def create_default_registry() -> ToolRegistry:
             ToolParameter("lines", "integer", "Number of lines to show", False, 10),
         ],
         builder=lambda args: ["tail", "-n", str(args.get("lines", 10)), args["path"]],
+        cacheable=True,
+        cache_ttl=0
+    ))
+
+    # preview tool (PREFERRED for reading files)
+    registry.register(ToolDefinition(
+        name="preview",
+        description="Preview file beginning (PREFERRED). Returns first 100 lines with metadata.",
+        parameters=[
+            ToolParameter("path", "string", "File path"),
+            ToolParameter("lines", "integer", "Lines to preview (max 500)", False, 100),
+        ],
+        builder=lambda args: ["head", "-n", str(min(args.get("lines", 100), 500)), args["path"]],
         cacheable=True,
         cache_ttl=0
     ))

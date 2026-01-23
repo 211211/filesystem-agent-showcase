@@ -318,3 +318,12 @@ For complex features:
 - Maintain >80% test coverage for cache modules
 - Follow existing code style (ruff formatting)
 - Update documentation for API changes
+
+### Type Safety (Pylance Compliance)
+
+All code must pass Pylance strict type checking. See [docs/TYPE_SAFETY.md](docs/TYPE_SAFETY.md) for patterns covering:
+- Sentinel values with `Union` types
+- `cast()` for return types and mock objects
+- `asyncio.gather` with `return_exceptions=True`
+- Interface return types in factories
+- Dict type annotations

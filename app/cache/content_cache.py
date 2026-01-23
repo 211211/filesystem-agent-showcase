@@ -13,13 +13,16 @@ import logging
 
 from app.cache.disk_cache import PersistentCache
 from app.cache.file_state import FileStateTracker
+from app.interfaces.cache import IContentCache
 
 logger = logging.getLogger(__name__)
 
 
-class ContentCache:
+class ContentCache(IContentCache):
     """
     Cache file content with automatic staleness detection.
+
+    Implements the IContentCache interface.
 
     This class provides a high-level interface for caching file content
     while automatically detecting when files have changed. It integrates
@@ -234,12 +237,14 @@ class ContentCache:
 
         # Note: DiskCache iteration is safe
         for key in self._cache._cache.iterkeys():
+            # Convert bytes to str if necessary (DiskCache may return bytes)
+            key_str = key.decode("utf-8") if isinstance(key, bytes) else key
             # Skip keys that don't have our prefix
-            if not key.startswith(self._content_prefix):
+            if not key_str.startswith(self._content_prefix):
                 continue
 
             # Extract the path from the cache key
-            cached_path_str = key[len(self._content_prefix):]
+            cached_path_str = key_str[len(self._content_prefix):]
             cached_path = Path(cached_path_str)
 
             # Check if cached_path is within directory using proper path comparison
@@ -247,7 +252,7 @@ class ContentCache:
             try:
                 cached_path.relative_to(dir_resolved)
                 # If no exception, cached_path is inside directory
-                await self._cache.delete(key)
+                await self._cache.delete(key_str)
                 count += 1
             except ValueError:
                 # Not within directory, skip

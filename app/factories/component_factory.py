@@ -4,7 +4,7 @@ Provides abstract factory pattern for dependency injection and testing.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Optional, Union, cast
 
 from openai import AsyncAzureOpenAI
 
@@ -17,6 +17,9 @@ from app.config.agent_config import (
 from app.sandbox.executor import SandboxExecutor
 from app.agent.orchestrator import ParallelToolOrchestrator
 from app.cache.cache_manager import CacheManager
+from app.interfaces.executor import IExecutor
+from app.interfaces.cache import ICacheManager
+from app.interfaces.orchestrator import IToolOrchestrator
 
 # Sentinel value to distinguish between "not provided" and "explicitly None"
 _NOT_PROVIDED = object()
@@ -39,7 +42,7 @@ class ComponentFactory(ABC):
         pass
 
     @abstractmethod
-    def create_executor(self, config: SandboxConfig) -> SandboxExecutor:
+    def create_executor(self, config: SandboxConfig) -> IExecutor:
         """
         Create sandbox executor.
 
@@ -47,12 +50,12 @@ class ComponentFactory(ABC):
             config: Sandbox configuration
 
         Returns:
-            Configured SandboxExecutor
+            Configured executor implementing IExecutor
         """
         pass
 
     @abstractmethod
-    def create_cache_manager(self, config: CacheConfig) -> Optional[CacheManager]:
+    def create_cache_manager(self, config: CacheConfig) -> Optional[ICacheManager]:
         """
         Create cache manager (None if disabled).
 
@@ -60,7 +63,7 @@ class ComponentFactory(ABC):
             config: Cache configuration
 
         Returns:
-            CacheManager instance if enabled, None otherwise
+            CacheManager implementing ICacheManager if enabled, None otherwise
         """
         pass
 
@@ -68,17 +71,17 @@ class ComponentFactory(ABC):
     def create_orchestrator(
         self,
         config: OrchestratorConfig,
-        executor: SandboxExecutor,
-    ) -> ParallelToolOrchestrator:
+        executor: IExecutor,
+    ) -> IToolOrchestrator:
         """
         Create tool orchestrator.
 
         Args:
             config: Orchestrator configuration
-            executor: Sandbox executor to use
+            executor: Executor implementing IExecutor
 
         Returns:
-            Configured ParallelToolOrchestrator
+            Configured orchestrator implementing IToolOrchestrator
         """
         pass
 
@@ -94,7 +97,7 @@ class DefaultComponentFactory(ComponentFactory):
             api_version=config.api_version,
         )
 
-    def create_executor(self, config: SandboxConfig) -> SandboxExecutor:
+    def create_executor(self, config: SandboxConfig) -> IExecutor:
         """Create production sandbox executor."""
         return SandboxExecutor(
             root_path=config.root_path,
@@ -104,7 +107,7 @@ class DefaultComponentFactory(ComponentFactory):
             enabled=config.enabled,
         )
 
-    def create_cache_manager(self, config: CacheConfig) -> Optional[CacheManager]:
+    def create_cache_manager(self, config: CacheConfig) -> Optional[ICacheManager]:
         """Create cache manager if enabled."""
         if not config.enabled:
             return None
@@ -121,8 +124,8 @@ class DefaultComponentFactory(ComponentFactory):
     def create_orchestrator(
         self,
         config: OrchestratorConfig,
-        executor: SandboxExecutor,
-    ) -> ParallelToolOrchestrator:
+        executor: IExecutor,
+    ) -> IToolOrchestrator:
         """Create production tool orchestrator."""
         return ParallelToolOrchestrator(
             sandbox=executor,
@@ -133,12 +136,18 @@ class DefaultComponentFactory(ComponentFactory):
 class MockComponentFactory(ComponentFactory):
     """Factory for testing with mock components."""
 
+    # Sentinel type alias for better type hints
+    _SentinelOrClient = Union[object, AsyncAzureOpenAI, None]
+    _SentinelOrExecutor = Union[object, IExecutor, None]
+    _SentinelOrCacheManager = Union[object, ICacheManager, None]
+    _SentinelOrOrchestrator = Union[object, IToolOrchestrator, None]
+
     def __init__(
         self,
-        mock_client=_NOT_PROVIDED,
-        mock_executor=_NOT_PROVIDED,
-        mock_cache_manager=_NOT_PROVIDED,
-        mock_orchestrator=_NOT_PROVIDED,
+        mock_client: _SentinelOrClient = _NOT_PROVIDED,
+        mock_executor: _SentinelOrExecutor = _NOT_PROVIDED,
+        mock_cache_manager: _SentinelOrCacheManager = _NOT_PROVIDED,
+        mock_orchestrator: _SentinelOrOrchestrator = _NOT_PROVIDED,
     ):
         """
         Initialize test factory with optional mocks.
@@ -149,15 +158,19 @@ class MockComponentFactory(ComponentFactory):
             mock_cache_manager: Mock CacheManager (or None to disable, default creates real cache)
             mock_orchestrator: Mock ParallelToolOrchestrator (or None to disable)
         """
-        self.mock_client = mock_client
-        self.mock_executor = mock_executor
-        self.mock_cache_manager = mock_cache_manager
-        self.mock_orchestrator = mock_orchestrator
+        self.mock_client: MockComponentFactory._SentinelOrClient = mock_client
+        self.mock_executor: MockComponentFactory._SentinelOrExecutor = mock_executor
+        self.mock_cache_manager: MockComponentFactory._SentinelOrCacheManager = (
+            mock_cache_manager
+        )
+        self.mock_orchestrator: MockComponentFactory._SentinelOrOrchestrator = (
+            mock_orchestrator
+        )
 
     def create_client(self, config: OpenAIConfig) -> AsyncAzureOpenAI:
         """Create mock or real Azure OpenAI client."""
         if self.mock_client is not _NOT_PROVIDED:
-            return self.mock_client
+            return cast(AsyncAzureOpenAI, self.mock_client)
 
         # Return a mock that can be used in tests
         from unittest.mock import AsyncMock, MagicMock
@@ -166,12 +179,12 @@ class MockComponentFactory(ComponentFactory):
         mock.chat = MagicMock()
         mock.chat.completions = MagicMock()
         mock.chat.completions.create = AsyncMock()
-        return mock
+        return cast(AsyncAzureOpenAI, mock)
 
-    def create_executor(self, config: SandboxConfig) -> SandboxExecutor:
+    def create_executor(self, config: SandboxConfig) -> IExecutor:
         """Create mock or real sandbox executor."""
         if self.mock_executor is not _NOT_PROVIDED:
-            return self.mock_executor
+            return cast(IExecutor, self.mock_executor)
 
         # Return real executor for integration tests
         return SandboxExecutor(
@@ -182,11 +195,11 @@ class MockComponentFactory(ComponentFactory):
             enabled=config.enabled,
         )
 
-    def create_cache_manager(self, config: CacheConfig) -> Optional[CacheManager]:
+    def create_cache_manager(self, config: CacheConfig) -> Optional[ICacheManager]:
         """Create mock or test cache manager."""
         if self.mock_cache_manager is not _NOT_PROVIDED:
             # Return the mock even if it's explicitly None
-            return self.mock_cache_manager
+            return cast(Optional[ICacheManager], self.mock_cache_manager)
 
         if not config.enabled:
             return None
@@ -202,11 +215,11 @@ class MockComponentFactory(ComponentFactory):
     def create_orchestrator(
         self,
         config: OrchestratorConfig,
-        executor: SandboxExecutor,
-    ) -> ParallelToolOrchestrator:
+        executor: IExecutor,
+    ) -> IToolOrchestrator:
         """Create mock or real tool orchestrator."""
         if self.mock_orchestrator is not _NOT_PROVIDED:
-            return self.mock_orchestrator
+            return cast(IToolOrchestrator, self.mock_orchestrator)
 
         return ParallelToolOrchestrator(
             sandbox=executor,

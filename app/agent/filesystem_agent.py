@@ -162,6 +162,61 @@ class FilesystemAgent:
             # Fallback to legacy build_command for backward compatibility
             return build_command(tool_name, arguments)
 
+    async def _execute_preview(self, tool_call: ToolCall) -> ExecutionResult:
+        """
+        Execute preview with file metadata.
+
+        Preview returns the first N lines of a file along with metadata about
+        the total file size and line count, helping the LLM decide whether to
+        read the full file with 'cat'.
+
+        Args:
+            tool_call: The tool call to execute
+
+        Returns:
+            ExecutionResult with preview content and metadata
+        """
+        path_str = tool_call.arguments.get("path", "")
+        lines = min(tool_call.arguments.get("lines", 100), 500)
+        file_path = (self.data_root / path_str).resolve()
+
+        try:
+            # Get metadata
+            file_size = file_path.stat().st_size if file_path.exists() else 0
+            wc_result = await self.sandbox.execute(["wc", "-l", str(file_path)])
+            total_lines = int(wc_result.stdout.split()[0]) if wc_result.success else 0
+
+            # Execute head
+            result = await self.sandbox.execute(["head", "-n", str(lines), str(file_path)])
+
+            if result.success:
+                # Add metadata suffix
+                metadata = f"\n--- Preview: {lines} of {total_lines} lines"
+                if total_lines > lines:
+                    metadata += f" | Use 'cat {path_str}' for full content"
+                metadata += f" | Size: {file_size/1024:.1f}KB ---"
+
+                return ExecutionResult(
+                    success=True,
+                    stdout=result.stdout + metadata,
+                    stderr="",
+                    return_code=0,
+                    command=f"preview {path_str}",
+                    error=None,
+                )
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in preview for {path_str}: {e}")
+            return ExecutionResult(
+                success=False,
+                stdout="",
+                stderr=str(e),
+                return_code=-1,
+                command=f"preview {path_str}",
+                error="PreviewError",
+            )
+
     async def _execute_tool(self, tool_call: ToolCall) -> ExecutionResult:
         """
         Execute a single tool call.
@@ -175,6 +230,10 @@ class FilesystemAgent:
         logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
 
         try:
+            # Handle preview tool specially - always add metadata
+            if tool_call.name == "preview":
+                return await self._execute_preview(tool_call)
+
             # If new cache manager is available, use cached versions for read/search operations
             if self.cache_manager is not None:
                 if tool_call.name in ("cat", "head", "tail"):
@@ -378,7 +437,7 @@ class FilesystemAgent:
             result = await self.sandbox.execute(command)
             return result
 
-    def _parse_tool_calls(self, response_message) -> list[ToolCall]:
+    def _parse_tool_calls(self, response_message: Any) -> list[ToolCall]:
         """Parse tool calls from the LLM response."""
         tool_calls = []
         if response_message.tool_calls:

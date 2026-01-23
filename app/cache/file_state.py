@@ -10,6 +10,8 @@ from pathlib import Path
 import hashlib
 from typing import Optional, TYPE_CHECKING
 
+from app.interfaces.cache import IFileStateTracker
+
 if TYPE_CHECKING:
     from app.cache.disk_cache import PersistentCache
 
@@ -78,9 +80,11 @@ class FileState:
         return hasher.hexdigest()
 
 
-class FileStateTracker:
+class FileStateTracker(IFileStateTracker):
     """
     Track and compare file states for cache invalidation.
+
+    Implements the IFileStateTracker interface.
 
     This class maintains a cache of file states and provides methods to detect
     when files have been modified by comparing cached state with current state.

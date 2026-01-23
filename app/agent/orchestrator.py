@@ -7,10 +7,11 @@ import asyncio
 import logging
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Optional, TYPE_CHECKING
+from typing import List, Optional, Tuple, TYPE_CHECKING, cast
 
 from app.agent.tools.bash_tools import build_command
 from app.sandbox.executor import SandboxExecutor, ExecutionResult
+from app.interfaces.orchestrator import IToolOrchestrator
 
 if TYPE_CHECKING:
     from app.agent.filesystem_agent import ToolCall
@@ -51,9 +52,11 @@ WRITE_TOOLS = frozenset({
 })
 
 
-class ParallelToolOrchestrator:
+class ParallelToolOrchestrator(IToolOrchestrator):
     """
     Orchestrates parallel execution of tool calls.
+
+    Implements the IToolOrchestrator interface.
 
     This orchestrator analyzes tool calls to determine which can be executed
     in parallel (read-only tools) and which need sequential execution.
@@ -73,8 +76,13 @@ class ParallelToolOrchestrator:
             max_concurrent: Maximum number of concurrent tool executions
         """
         self.sandbox = sandbox
-        self.max_concurrent = max_concurrent
+        self._max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    @property
+    def max_concurrent(self) -> int:
+        """Get the maximum number of concurrent executions."""
+        return self._max_concurrent
 
     async def execute_tool_with_semaphore(
         self,
@@ -127,8 +135,8 @@ class ParallelToolOrchestrator:
 
     async def execute_parallel(
         self,
-        tool_calls: list["ToolCall"],
-    ) -> list[tuple["ToolCall", ExecutionResult]]:
+        tool_calls: List["ToolCall"],
+    ) -> List[Tuple["ToolCall", ExecutionResult]]:
         """
         Execute multiple tool calls in parallel using asyncio.gather.
 
@@ -141,7 +149,7 @@ class ParallelToolOrchestrator:
         if not tool_calls:
             return []
 
-        logger.info(f"Executing {len(tool_calls)} tools in parallel (max concurrent: {self.max_concurrent})")
+        logger.info(f"Executing {len(tool_calls)} tools in parallel (max concurrent: {self._max_concurrent})")
 
         # Create tasks for parallel execution
         tasks = [
@@ -153,7 +161,7 @@ class ParallelToolOrchestrator:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Process results, handling any exceptions
-        processed_results: list[tuple["ToolCall", ExecutionResult]] = []
+        processed_results: List[Tuple["ToolCall", ExecutionResult]] = []
         for i, result in enumerate(results):
             tool_call = tool_calls[i]
             if isinstance(result, Exception):
@@ -168,14 +176,15 @@ class ParallelToolOrchestrator:
                 )
                 processed_results.append((tool_call, error_result))
             else:
-                processed_results.append(result)
+                # Type narrowing: result is Tuple[ToolCall, ExecutionResult] after Exception check
+                processed_results.append(cast(Tuple["ToolCall", ExecutionResult], result))
 
         return processed_results
 
     async def execute_sequential(
         self,
-        tool_calls: list["ToolCall"],
-    ) -> list[tuple["ToolCall", ExecutionResult]]:
+        tool_calls: List["ToolCall"],
+    ) -> List[Tuple["ToolCall", ExecutionResult]]:
         """
         Execute tool calls sequentially (one at a time).
 
@@ -185,7 +194,7 @@ class ParallelToolOrchestrator:
         Returns:
             List of (tool_call, result) tuples in the same order as input
         """
-        results: list[tuple["ToolCall", ExecutionResult]] = []
+        results: List[Tuple["ToolCall", ExecutionResult]] = []
 
         for tc in tool_calls:
             logger.info(f"Executing tool sequentially: {tc.name}")
@@ -196,8 +205,8 @@ class ParallelToolOrchestrator:
 
     def analyze_dependencies(
         self,
-        tool_calls: list["ToolCall"],
-    ) -> list[ToolGroup]:
+        tool_calls: List["ToolCall"],
+    ) -> List[ToolGroup]:
         """
         Analyze tool calls to determine execution strategy.
 
@@ -214,8 +223,8 @@ class ParallelToolOrchestrator:
             return []
 
         # Separate read-only and write tools
-        read_only_calls: list["ToolCall"] = []
-        write_calls: list["ToolCall"] = []
+        read_only_calls: List["ToolCall"] = []
+        write_calls: List["ToolCall"] = []
 
         for tc in tool_calls:
             if tc.name in READ_ONLY_TOOLS:
@@ -227,7 +236,7 @@ class ParallelToolOrchestrator:
                 logger.warning(f"Unknown tool {tc.name}, treating as sequential")
                 write_calls.append(tc)
 
-        groups: list[ToolGroup] = []
+        groups: List[ToolGroup] = []
 
         # All read-only tools can be parallel
         if read_only_calls:
@@ -250,8 +259,8 @@ class ParallelToolOrchestrator:
 
     async def execute_with_strategy(
         self,
-        tool_calls: list["ToolCall"],
-    ) -> list[tuple["ToolCall", ExecutionResult]]:
+        tool_calls: List["ToolCall"],
+    ) -> List[Tuple["ToolCall", ExecutionResult]]:
         """
         Execute tool calls using the appropriate strategy based on analysis.
 
@@ -271,7 +280,7 @@ class ParallelToolOrchestrator:
         groups = self.analyze_dependencies(tool_calls)
 
         # Collect all results
-        all_results: list[tuple["ToolCall", ExecutionResult]] = []
+        all_results: List[Tuple["ToolCall", ExecutionResult]] = []
 
         for group in groups:
             logger.info(f"Executing group with strategy: {group.strategy.value}, tools: {[t.name for t in group.tools]}")

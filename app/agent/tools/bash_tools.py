@@ -3,7 +3,7 @@ Bash tools for the Filesystem Agent.
 Provides wrappers around common Unix commands for file exploration.
 """
 
-from typing import Any
+from typing import Any, Callable, Optional
 
 # Tool definitions for OpenAI function calling format
 BASH_TOOLS = [
@@ -69,7 +69,7 @@ BASH_TOOLS = [
         "type": "function",
         "function": {
             "name": "cat",
-            "description": "Read and display the entire contents of a file. Use for reading file content.",
+            "description": "Read ENTIRE file contents. WARNING: Expensive for large files. Use 'preview' first to see beginning, then 'cat' only if you need complete content.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -98,6 +98,28 @@ BASH_TOOLS = [
                         "type": "integer",
                         "description": "Number of lines to read from the beginning",
                         "default": 10
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "preview",
+            "description": "Preview the beginning of a file. PREFERRED tool for reading files. Returns first 100 lines with metadata (total lines, size). Use this before deciding to read full file with 'cat'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file"
+                    },
+                    "lines": {
+                        "type": "integer",
+                        "description": "Lines to preview (default: 100, max: 500)",
+                        "default": 100
                     }
                 },
                 "required": ["path"]
@@ -240,6 +262,11 @@ def build_head_command(path: str, lines: int = 10) -> list[str]:
     return ["head", "-n", str(lines), path]
 
 
+def build_preview_command(path: str, lines: int = 100) -> list[str]:
+    """Build preview command (head with line limit)."""
+    return ["head", "-n", str(min(lines, 500)), path]
+
+
 def build_ls_command(
     path: str,
     show_all: bool = False,
@@ -275,7 +302,7 @@ def build_wc_command(path: str, lines_only: bool = False) -> list[str]:
 
 def build_smart_read_command(
     path: str,
-    query: str = None,
+    query: Optional[str] = None,
     max_lines: int = 100
 ) -> dict:
     """
@@ -299,13 +326,14 @@ def build_smart_read_command(
     }
 
 
-def get_command_builder(tool_name: str) -> callable:
+def get_command_builder(tool_name: str) -> Optional[Callable[..., Any]]:
     """Get the command builder function for a tool."""
     builders = {
         "grep": build_grep_command,
         "find": build_find_command,
         "cat": build_cat_command,
         "head": build_head_command,
+        "preview": build_preview_command,
         "ls": build_ls_command,
         "tree": build_tree_command,
         "wc": build_wc_command,
@@ -337,6 +365,10 @@ def build_command(tool_name: str, args: dict[str, Any]) -> list[str]:
         "head": lambda a: build_head_command(
             path=a["path"],
             lines=a.get("lines", 10)
+        ),
+        "preview": lambda a: build_preview_command(
+            path=a["path"],
+            lines=min(a.get("lines", 100), 500)
         ),
         "ls": lambda a: build_ls_command(
             path=a["path"],

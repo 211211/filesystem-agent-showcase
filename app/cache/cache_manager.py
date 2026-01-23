@@ -15,13 +15,22 @@ from app.cache.file_state import FileStateTracker
 from app.cache.content_cache import ContentCache
 from app.cache.search_cache import SearchCache
 from app.config import Settings, get_settings
+from app.interfaces.cache import (
+    ICacheManager,
+    ICacheBackend,
+    IFileStateTracker,
+    IContentCache,
+    ISearchCache,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class CacheManager:
+class CacheManager(ICacheManager):
     """
     Unified cache manager coordinating all cache components.
+
+    Implements the ICacheManager interface.
 
     This class provides a high-level interface to all caching functionality in the
     application. It initializes and coordinates the following components:
@@ -34,10 +43,10 @@ class CacheManager:
     providing a unified entry point for all cache operations.
 
     Attributes:
-        persistent_cache: The underlying PersistentCache instance
-        file_state_tracker: FileStateTracker for detecting file changes
-        content_cache: ContentCache for caching file content
-        search_cache: SearchCache for caching search results
+        _persistent_cache: The underlying PersistentCache instance
+        _file_state_tracker: FileStateTracker for detecting file changes
+        _content_cache: ContentCache for caching file content
+        _search_cache: SearchCache for caching search results
 
     Example:
         >>> # Initialize with custom settings
@@ -98,25 +107,25 @@ class CacheManager:
         )
 
         # Initialize disk cache backend (L2 cache)
-        self.persistent_cache = PersistentCache(
+        self._persistent_cache = PersistentCache(
             cache_dir=cache_dir,
             size_limit=size_limit,
         )
 
         # Initialize file state tracker for change detection
-        self.file_state_tracker = FileStateTracker(self.persistent_cache)
+        self._file_state_tracker = FileStateTracker(self._persistent_cache)
 
         # Initialize content cache with file state tracking and TTL
-        self.content_cache = ContentCache(
-            disk_cache=self.persistent_cache,
-            state_tracker=self.file_state_tracker,
+        self._content_cache = ContentCache(
+            disk_cache=self._persistent_cache,
+            state_tracker=self._file_state_tracker,
             default_ttl=content_ttl,
         )
 
         # Initialize search cache with scope-aware invalidation and TTL
-        self.search_cache = SearchCache(
-            disk_cache=self.persistent_cache,
-            state_tracker=self.file_state_tracker,
+        self._search_cache = SearchCache(
+            disk_cache=self._persistent_cache,
+            state_tracker=self._file_state_tracker,
             default_ttl=search_ttl,
         )
 
@@ -125,6 +134,26 @@ class CacheManager:
         self._search_ttl = search_ttl
 
         logger.info("CacheManager initialized successfully")
+
+    @property
+    def persistent_cache(self) -> ICacheBackend:
+        """Get the underlying persistent cache backend."""
+        return self._persistent_cache
+
+    @property
+    def file_state_tracker(self) -> IFileStateTracker:
+        """Get the file state tracker."""
+        return self._file_state_tracker
+
+    @property
+    def content_cache(self) -> IContentCache:
+        """Get the content cache."""
+        return self._content_cache
+
+    @property
+    def search_cache(self) -> ISearchCache:
+        """Get the search cache."""
+        return self._search_cache
 
     @classmethod
     def default(cls, settings: Optional[Settings] = None) -> "CacheManager":
@@ -212,7 +241,7 @@ class CacheManager:
             The 'size' metric represents the number of entries, while 'volume'
             represents the actual disk space used (which includes overhead).
         """
-        disk_stats = self.persistent_cache.stats()
+        disk_stats = self._persistent_cache.stats()
 
         return {
             "enabled": True,
@@ -260,7 +289,7 @@ class CacheManager:
 
         # Clear the persistent cache (which clears all entries including
         # content cache, search cache, and file state tracking)
-        await self.persistent_cache.clear()
+        await self._persistent_cache.clear()
 
         logger.info("All caches cleared successfully")
 
@@ -307,7 +336,7 @@ class CacheManager:
             After calling close(), the cache manager instance should not be used.
         """
         logger.info("Closing CacheManager")
-        self.persistent_cache.close()
+        self._persistent_cache.close()
         logger.info("CacheManager closed successfully")
 
     def __del__(self):
@@ -318,7 +347,7 @@ class CacheManager:
         close() is not explicitly called.
         """
         try:
-            self.persistent_cache.close()
+            self._persistent_cache.close()
         except Exception:
             # Silently ignore errors during cleanup
             pass
