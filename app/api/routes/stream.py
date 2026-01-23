@@ -12,7 +12,8 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
-from app.sandbox.executor import SandboxExecutor, PathTraversalError
+from app.sandbox.executor import SandboxExecutor
+from app.exceptions import PathTraversalException
 from app.agent.tools.streaming import StreamingFileReader
 
 router = APIRouter(prefix="/stream", tags=["stream"])
@@ -254,7 +255,7 @@ async def stream_file(
     # Validate path is within sandbox
     try:
         validated_path = sandbox.validate_path(path)
-    except PathTraversalError as e:
+    except PathTraversalException as e:
         raise HTTPException(status_code=403, detail=str(e))
 
     # Check file exists
@@ -307,7 +308,7 @@ async def stream_search(
     # Validate path is within sandbox
     try:
         validated_path = sandbox.validate_path(path)
-    except PathTraversalError as e:
+    except PathTraversalException as e:
         raise HTTPException(status_code=403, detail=str(e))
 
     # Check file exists

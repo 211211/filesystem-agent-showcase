@@ -10,6 +10,13 @@ from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
 
+from app.exceptions import (
+    PathTraversalException,
+    CommandNotAllowedException,
+    TimeoutException,
+    ExecutionException,
+)
+
 
 # Whitelisted commands that can be executed
 # Only POSIX-compliant commands that work on both macOS (BSD) and Linux (GNU)
@@ -39,38 +46,28 @@ def format_size(size_bytes: int) -> str:
         return f"{size_bytes / 1024 / 1024:.1f} MB"
 
 
-class SandboxError(Exception):
-    """Base exception for sandbox-related errors."""
-    pass
-
-
-class PathTraversalError(SandboxError):
-    """Raised when a path traversal attack is detected."""
-    pass
-
-
-class CommandNotAllowedError(SandboxError):
-    """Raised when a command is not in the whitelist."""
-    pass
-
-
-class ExecutionTimeoutError(SandboxError):
-    """Raised when command execution times out."""
-    pass
-
-
-class FileTooLargeError(SandboxError):
+class FileTooLargeError(ExecutionException):
     """Raised when a file exceeds the maximum allowed size."""
 
     def __init__(self, file_path: Path, file_size: int, max_size: int):
         self.file_path = file_path
         self.file_size = file_size
         self.max_size = max_size
-        super().__init__(
+        message = (
             f"File '{file_path.name}' ({format_size(file_size)}) exceeds "
             f"maximum allowed size ({format_size(max_size)}). "
             f"Use 'head' to read the first N lines instead."
         )
+        super().__init__(
+            message=message,
+            details={
+                "file_path": str(file_path),
+                "file_size": file_size,
+                "max_size": max_size,
+            }
+        )
+    error_code = "FILE_TOO_LARGE"
+    status_code = 413
 
 
 @dataclass
@@ -144,14 +141,14 @@ class SandboxExecutor:
             command: The command as a list of strings
 
         Raises:
-            CommandNotAllowedError: If the command is not whitelisted
+            CommandNotAllowedException: If the command is not whitelisted
         """
         if not command:
-            raise CommandNotAllowedError("Empty command")
+            raise CommandNotAllowedException("Empty command")
 
         cmd_name = Path(command[0]).name  # Handle full paths like /usr/bin/grep
         if cmd_name not in ALLOWED_COMMANDS:
-            raise CommandNotAllowedError(
+            raise CommandNotAllowedException(
                 f"Command '{cmd_name}' is not allowed. "
                 f"Allowed commands: {', '.join(sorted(ALLOWED_COMMANDS))}"
             )
@@ -167,7 +164,7 @@ class SandboxExecutor:
             The resolved absolute path
 
         Raises:
-            PathTraversalError: If the path escapes the sandbox
+            PathTraversalException: If the path escapes the sandbox
         """
         # Handle relative paths
         if not Path(path).is_absolute():
@@ -179,7 +176,7 @@ class SandboxExecutor:
         try:
             resolved.relative_to(self.root_path)
         except ValueError:
-            raise PathTraversalError(
+            raise PathTraversalException(
                 f"Path '{path}' is outside the sandbox root '{self.root_path}'"
             )
 
@@ -316,7 +313,7 @@ class SandboxExecutor:
                 try:
                     resolved = self.validate_path(arg)
                     sanitized.append(str(resolved))
-                except PathTraversalError:
+                except PathTraversalException:
                     raise
                 except Exception:
                     # Validation failed, keep as-is
@@ -367,7 +364,7 @@ class SandboxExecutor:
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
-                raise ExecutionTimeoutError(
+                raise TimeoutException(
                     f"Command timed out after {self.timeout} seconds"
                 )
 
@@ -383,14 +380,14 @@ class SandboxExecutor:
                 command=sanitized_str,
             )
 
-        except SandboxError as e:
+        except (PathTraversalException, CommandNotAllowedException, TimeoutException, ExecutionException) as e:
             return ExecutionResult(
                 success=False,
                 stdout="",
-                stderr=str(e),
+                stderr=e.message if hasattr(e, 'message') else str(e),
                 return_code=-1,
                 command=command_str,
-                error=type(e).__name__,
+                error=e.error_code if hasattr(e, 'error_code') else type(e).__name__,
             )
         except Exception as e:
             return ExecutionResult(

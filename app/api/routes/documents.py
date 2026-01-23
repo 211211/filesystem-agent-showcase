@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query
 from pydantic import BaseModel, Field
 
 from app.config import get_settings, Settings
+from app.exceptions import ValidationException, PathTraversalException
 from app.agent.tools.file_tools import (
     read_file,
     write_file,
@@ -67,8 +68,16 @@ def validate_path(path: str, data_root: Path) -> Path:
     """
     Validate and resolve a path within the data root.
 
-    Raises HTTPException if path is invalid or outside data root.
+    Raises ValidationException if path is empty or invalid.
+    Raises PathTraversalException if path is outside data root.
     """
+    # Validate path is not empty
+    if not path or not path.strip():
+        raise ValidationException(
+            "Path cannot be empty",
+            details={"path": path}
+        )
+
     # Normalize the path
     if path.startswith("/"):
         path = path[1:]
@@ -79,9 +88,9 @@ def validate_path(path: str, data_root: Path) -> Path:
     try:
         full_path.relative_to(data_root)
     except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail="Path traversal not allowed"
+        raise PathTraversalException(
+            f"Path '{path}' is outside the data root directory",
+            details={"path": path, "data_root": str(data_root)}
         )
 
     return full_path

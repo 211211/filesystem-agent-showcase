@@ -9,9 +9,12 @@ import os
 
 from app.sandbox.executor import (
     SandboxExecutor,
-    PathTraversalError,
-    CommandNotAllowedError,
     ExecutionResult,
+    FileTooLargeError,
+)
+from app.exceptions import (
+    PathTraversalException,
+    CommandNotAllowedException,
 )
 
 
@@ -44,18 +47,18 @@ class TestCommandValidation:
 
     def test_disallowed_command(self, sandbox):
         """Test that disallowed commands raise errors."""
-        with pytest.raises(CommandNotAllowedError):
+        with pytest.raises(CommandNotAllowedException):
             sandbox.validate_command(["rm", "-rf", "."])
 
-        with pytest.raises(CommandNotAllowedError):
+        with pytest.raises(CommandNotAllowedException):
             sandbox.validate_command(["chmod", "+x", "file"])
 
-        with pytest.raises(CommandNotAllowedError):
+        with pytest.raises(CommandNotAllowedException):
             sandbox.validate_command(["curl", "http://evil.com"])
 
     def test_empty_command(self, sandbox):
         """Test that empty commands raise errors."""
-        with pytest.raises(CommandNotAllowedError):
+        with pytest.raises(CommandNotAllowedException):
             sandbox.validate_command([])
 
 
@@ -74,10 +77,10 @@ class TestPathValidation:
 
     def test_path_traversal_blocked(self, sandbox):
         """Test that path traversal attempts are blocked."""
-        with pytest.raises(PathTraversalError):
+        with pytest.raises(PathTraversalException):
             sandbox.validate_path("../../../etc/passwd")
 
-        with pytest.raises(PathTraversalError):
+        with pytest.raises(PathTraversalException):
             sandbox.validate_path("/etc/passwd")
 
 
@@ -133,14 +136,14 @@ class TestCommandExecution:
         """Test that disallowed commands fail gracefully."""
         result = await sandbox.execute(["rm", "test.txt"])
         assert not result.success
-        assert result.error == "CommandNotAllowedError"
+        assert result.error == "COMMAND_NOT_ALLOWED"
 
     @pytest.mark.asyncio
     async def test_path_traversal_execution(self, sandbox):
         """Test that path traversal is blocked during execution."""
         result = await sandbox.execute(["cat", "../../../etc/passwd"])
         assert not result.success
-        assert result.error == "PathTraversalError"
+        assert result.error == "PATH_TRAVERSAL"
 
     @pytest.mark.asyncio
     async def test_nonexistent_file(self, sandbox):

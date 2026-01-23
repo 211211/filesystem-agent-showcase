@@ -2,7 +2,6 @@
 Chat API routes for the Filesystem Agent.
 """
 
-import asyncio
 import json
 import uuid
 import logging
@@ -11,17 +10,14 @@ from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.config import get_settings, Settings
+from app.dependencies import get_settings, get_session_repository
+from app.settings import Settings
+from app.repositories.session_repository import SessionRepository
 from app.agent.filesystem_agent import create_agent, FilesystemAgent
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
-
-
-# In-memory session storage (use Redis/DB in production)
-_sessions: dict[str, list[dict]] = {}
-_sessions_lock = asyncio.Lock()  # Protects concurrent access to _sessions
 
 
 class ChatRequest(BaseModel):
@@ -59,7 +55,19 @@ class ChatResponse(BaseModel):
 
 
 def get_agent(settings: Settings = Depends(get_settings)) -> FilesystemAgent:
-    """Dependency to get the filesystem agent."""
+    """Dependency to get the filesystem agent.
+
+    Note: This is the legacy implementation using create_agent().
+    For new code, consider using the factory-based approach from app.dependencies.get_agent()
+    which provides better dependency injection and testability.
+
+    Example migration:
+        # Old way (current):
+        from app.api.routes.chat import get_agent
+
+        # New way (recommended):
+        from app.dependencies import get_agent
+    """
     return create_agent(
         api_key=settings.azure_openai_api_key,
         endpoint=settings.azure_openai_endpoint,
@@ -89,6 +97,7 @@ def get_agent(settings: Settings = Depends(get_settings)) -> FilesystemAgent:
 async def chat(
     request: ChatRequest,
     agent: FilesystemAgent = Depends(get_agent),
+    session_repo: SessionRepository = Depends(get_session_repository),
 ):
     """
     Send a message to the filesystem agent.
@@ -106,26 +115,24 @@ async def chat(
         # Get or create session
         session_id = request.session_id or str(uuid.uuid4())
 
-        # Read session history with lock (copy to avoid holding lock during agent call)
-        async with _sessions_lock:
-            history = _sessions.get(session_id, []).copy()
+        # Get session from repository (with automatic locking)
+        session = await session_repo.get_or_create(session_id)
 
         logger.info(f"Processing chat request for session {session_id}")
 
-        # Get agent response (long-running, don't hold lock)
+        # Get history from session
+        history = session.get_history()
+
+        # Get agent response (long-running, repository handles locking)
         response = await agent.chat(
             user_message=request.message,
             history=history,
         )
 
-        # Update session history with lock
-        async with _sessions_lock:
-            # Re-read current state and merge (handles concurrent updates)
-            current_history = _sessions.get(session_id, [])
-            current_history.append({"role": "user", "content": request.message})
-            current_history.append({"role": "assistant", "content": response.message})
-            # Limit session history to prevent memory issues
-            _sessions[session_id] = current_history[-50:]
+        # Update session with new messages
+        session.add_message("user", request.message)
+        session.add_message("assistant", response.message)
+        await session_repo.update(session_id, session)
 
         return ChatResponse(
             response=response.message,
@@ -154,23 +161,31 @@ async def chat(
 
 
 @router.delete("/sessions/{session_id}")
-async def clear_session(session_id: str):
+async def clear_session(
+    session_id: str,
+    session_repo: SessionRepository = Depends(get_session_repository),
+):
     """Clear a chat session's history."""
-    async with _sessions_lock:
-        if session_id in _sessions:
-            del _sessions[session_id]
-            return {"message": f"Session {session_id} cleared"}
-    raise HTTPException(status_code=404, detail="Session not found")
+    session = await session_repo.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session.clear()
+    await session_repo.update(session_id, session)
+    return {"message": f"Session {session_id} cleared"}
 
 
 @router.get("/sessions/{session_id}/history")
-async def get_session_history(session_id: str):
+async def get_session_history(
+    session_id: str,
+    session_repo: SessionRepository = Depends(get_session_repository),
+):
     """Get the chat history for a session."""
-    async with _sessions_lock:
-        if session_id in _sessions:
-            # Return a copy to prevent external modification
-            return {"session_id": session_id, "history": _sessions[session_id].copy()}
-    raise HTTPException(status_code=404, detail="Session not found")
+    session = await session_repo.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {"session_id": session_id, "history": session.get_history()}
 
 
 async def sse_event_generator(
@@ -178,6 +193,7 @@ async def sse_event_generator(
     message: str,
     session_id: str,
     history: list[dict],
+    session_repo: SessionRepository,
 ) -> AsyncGenerator[str, None]:
     """
     Generate SSE events from the agent's streaming response.
@@ -187,6 +203,7 @@ async def sse_event_generator(
         message: User message
         session_id: Session ID
         history: Conversation history
+        session_repo: Session repository for persistence
 
     Yields:
         SSE formatted strings
@@ -199,12 +216,10 @@ async def sse_event_generator(
 
             # Update session history on done event
             if event_type == "done":
-                async with _sessions_lock:
-                    # Re-read current state and merge (handles concurrent updates)
-                    current_history = _sessions.get(session_id, [])
-                    current_history.append({"role": "user", "content": message})
-                    current_history.append({"role": "assistant", "content": event_data.get("message", "")})
-                    _sessions[session_id] = current_history[-50:]  # Limit history
+                session = await session_repo.get_or_create(session_id)
+                session.add_message("user", message)
+                session.add_message("assistant", event_data.get("message", ""))
+                await session_repo.update(session_id, session)
 
     except Exception as e:
         logger.exception(f"Error in SSE generator: {e}")
@@ -220,6 +235,7 @@ async def sse_event_generator(
 async def chat_stream(
     request: ChatRequest,
     agent: FilesystemAgent = Depends(get_agent),
+    session_repo: SessionRepository = Depends(get_session_repository),
 ):
     """
     Stream a chat response via Server-Sent Events (SSE).
@@ -298,14 +314,16 @@ async def chat_stream(
         # Get or create session
         session_id = request.session_id or str(uuid.uuid4())
 
-        # Read session history with lock (copy to avoid holding lock during streaming)
-        async with _sessions_lock:
-            history = _sessions.get(session_id, []).copy()
+        # Get session from repository
+        session = await session_repo.get_or_create(session_id)
 
         logger.info(f"Starting streaming chat for session {session_id}")
 
+        # Get history from session
+        history = session.get_history()
+
         return StreamingResponse(
-            sse_event_generator(agent, request.message, session_id, history),
+            sse_event_generator(agent, request.message, session_id, history, session_repo),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

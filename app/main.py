@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.api.routes import chat_router, documents_router, stream_router
+from app.exceptions import FilesystemAgentException, agent_exception_handler
 
 # Configure logging
 logging.basicConfig(
@@ -83,6 +84,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register exception handler
+app.add_exception_handler(FilesystemAgentException, agent_exception_handler)
 
 # Include routers
 app.include_router(chat_router, prefix="/api")

@@ -315,6 +315,7 @@ class TestSSEEventGenerator:
     async def test_sse_event_adds_session_id(self, agent, mock_openai_client):
         """Test that SSE events include session_id."""
         from app.api.routes.chat import sse_event_generator
+        from app.repositories.session_repository import SessionRepository
 
         # Mock simple response
         mock_chunk = MagicMock()
@@ -348,9 +349,12 @@ class TestSSEEventGenerator:
 
         session_id = "test-session-123"
 
+        # Create a session repository for the test
+        session_repo = SessionRepository(ttl_seconds=3600, max_messages=50)
+
         # Collect SSE events
         events = []
-        async for sse in sse_event_generator(agent, "Hello", session_id, []):
+        async for sse in sse_event_generator(agent, "Hello", session_id, [], session_repo):
             events.append(sse)
 
         # Verify session_id is in events

@@ -16,6 +16,7 @@ from app.sandbox.executor import SandboxExecutor, ExecutionResult
 from app.sandbox.cached_executor import CachedSandboxExecutor
 from app.agent.orchestrator import ParallelToolOrchestrator
 from app.cache import CacheManager
+from app.repositories.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,7 @@ class FilesystemAgent:
         parallel_execution: bool = True,
         max_concurrent_tools: int = 5,
         cache_manager: Optional[CacheManager] = None,
+        tool_registry: Optional[ToolRegistry] = None,
     ):
         """
         Initialize the filesystem agent.
@@ -105,6 +107,7 @@ class FilesystemAgent:
             parallel_execution: Whether to enable parallel tool execution
             max_concurrent_tools: Maximum number of concurrent tool executions
             cache_manager: Optional CacheManager for advanced caching (new system)
+            tool_registry: Optional ToolRegistry for tool management (if None, uses legacy BASH_TOOLS)
         """
         self.client = client
         self.deployment_name = deployment_name
@@ -114,6 +117,7 @@ class FilesystemAgent:
         self.parallel_execution = parallel_execution
         self.max_concurrent_tools = max_concurrent_tools
         self.cache_manager = cache_manager
+        self.tool_registry = tool_registry
 
         # Initialize orchestrator for parallel execution
         if parallel_execution:
@@ -123,6 +127,40 @@ class FilesystemAgent:
             )
         else:
             self._orchestrator = None
+
+    def get_tools(self) -> list[dict]:
+        """
+        Get tool definitions in OpenAI format.
+
+        Uses the injected tool_registry if available, otherwise falls back to legacy BASH_TOOLS.
+
+        Returns:
+            List of tool definitions in OpenAI function calling format
+        """
+        if self.tool_registry is not None:
+            return self.tool_registry.to_openai_format()
+        else:
+            # Fallback to legacy BASH_TOOLS for backward compatibility
+            return BASH_TOOLS
+
+    def _build_command(self, tool_name: str, arguments: dict) -> list[str]:
+        """
+        Build command for a tool.
+
+        Uses the injected tool_registry if available, otherwise falls back to legacy build_command.
+
+        Args:
+            tool_name: Name of the tool
+            arguments: Tool arguments
+
+        Returns:
+            Command as list of strings
+        """
+        if self.tool_registry is not None:
+            return self.tool_registry.build_command(tool_name, arguments)
+        else:
+            # Fallback to legacy build_command for backward compatibility
+            return build_command(tool_name, arguments)
 
     async def _execute_tool(self, tool_call: ToolCall) -> ExecutionResult:
         """
@@ -146,7 +184,7 @@ class FilesystemAgent:
                 # Other operations (ls, wc, tree, etc.) fall through to regular execution
 
             # Build the command from tool name and arguments
-            command = build_command(tool_call.name, tool_call.arguments)
+            command = self._build_command(tool_call.name, tool_call.arguments)
             logger.debug(f"Built command: {command}")
 
             # Execute in sandbox
@@ -192,7 +230,7 @@ class FilesystemAgent:
             # Define the loader function that reads FULL file content (always use cat)
             async def load_full_file(p: Path) -> str:
                 # Always use cat to get full content, regardless of the original operation
-                command = build_command("cat", {"path": path_str})
+                command = self._build_command("cat", {"path": path_str})
                 result = await self.sandbox.execute(command)
                 if result.success:
                     return result.stdout
@@ -238,7 +276,7 @@ class FilesystemAgent:
                 content = full_content
 
             # Build command string for logging (use original tool name for accurate logging)
-            command = build_command(tool_call.name, tool_call.arguments)
+            command = self._build_command(tool_call.name, tool_call.arguments)
 
             return ExecutionResult(
                 success=True,
@@ -251,7 +289,7 @@ class FilesystemAgent:
 
         except Exception as e:
             logger.error(f"Error in cached read for {tool_call.name}: {e}")
-            command = build_command(tool_call.name, tool_call.arguments)
+            command = self._build_command(tool_call.name, tool_call.arguments)
             return ExecutionResult(
                 success=False,
                 stdout="",
@@ -306,7 +344,7 @@ class FilesystemAgent:
 
             if cached_result is not None:
                 # Cache hit
-                command = build_command(tool_call.name, tool_call.arguments)
+                command = self._build_command(tool_call.name, tool_call.arguments)
                 return ExecutionResult(
                     success=True,
                     stdout=cached_result,
@@ -317,7 +355,7 @@ class FilesystemAgent:
                 )
 
             # Cache miss - execute and cache the result
-            command = build_command(tool_call.name, tool_call.arguments)
+            command = self._build_command(tool_call.name, tool_call.arguments)
             result = await self.sandbox.execute(command)
 
             if result.success:
@@ -336,7 +374,7 @@ class FilesystemAgent:
         except Exception as e:
             logger.error(f"Error in cached search for {tool_call.name}: {e}")
             # Fallback to regular execution on error
-            command = build_command(tool_call.name, tool_call.arguments)
+            command = self._build_command(tool_call.name, tool_call.arguments)
             result = await self.sandbox.execute(command)
             return result
 
@@ -470,7 +508,7 @@ class FilesystemAgent:
             response = await self.client.chat.completions.create(
                 model=self.deployment_name,
                 messages=messages,
-                tools=BASH_TOOLS,
+                tools=self.get_tools(),
                 tool_choice="auto",
             )
 
@@ -594,7 +632,7 @@ class FilesystemAgent:
                 stream = await self.client.chat.completions.create(
                     model=self.deployment_name,
                     messages=messages,
-                    tools=BASH_TOOLS,
+                    tools=self.get_tools(),
                     tool_choice="auto",
                     stream=True,
                 )

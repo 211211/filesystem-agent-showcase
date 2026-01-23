@@ -344,7 +344,7 @@ class TestCacheInheritance:
         result = await cached_executor.execute(["rm", "test.txt"])
 
         assert not result.success
-        assert result.error == "CommandNotAllowedError"
+        assert result.error == "COMMAND_NOT_ALLOWED"
 
     @pytest.mark.asyncio
     async def test_path_traversal_prevention_still_works(self, cached_executor):
@@ -352,7 +352,7 @@ class TestCacheInheritance:
         result = await cached_executor.execute(["cat", "../../../etc/passwd"])
 
         assert not result.success
-        assert result.error == "PathTraversalError"
+        assert result.error == "PATH_TRAVERSAL"
 
     @pytest.mark.asyncio
     async def test_allowed_commands_work(self, cached_executor):
