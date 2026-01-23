@@ -37,6 +37,9 @@ make container-stop   # Stop containers
 
 # Benchmarks
 poetry run python benchmarks/benchmark_v2.py --quick
+
+# Token usage benchmark (Vercel optimizations)
+poetry run python benchmarks/token_usage_comparison_v2.py
 ```
 
 ## Architecture
@@ -69,6 +72,7 @@ User Message → FilesystemAgent.chat() → Azure OpenAI (with BASH_TOOLS)
 | `FilesystemAgent` | `app/agent/filesystem_agent.py` | Core agent with chat() and chat_stream() methods |
 | `SandboxExecutor` | `app/sandbox/executor.py` | Secure command execution with whitelist |
 | `CachedSandboxExecutor` | `app/sandbox/cached_executor.py` | Executor with TTL-based result caching (v2.0 - legacy) |
+| `ToolResultCache` | `app/agent/cache.py` | TTL-based cache with path-aware invalidation (v2.0) |
 | `ParallelToolOrchestrator` | `app/agent/orchestrator.py` | Concurrent tool execution |
 | `CacheManager` | `app/cache/cache_manager.py` | Unified cache interface (v3.0) |
 | `PersistentCache` | `app/cache/disk_cache.py` | Disk-based cache with LRU eviction (v3.0) |
@@ -76,11 +80,13 @@ User Message → FilesystemAgent.chat() → Azure OpenAI (with BASH_TOOLS)
 | `ContentCache` | `app/cache/content_cache.py` | File content caching (v3.0) |
 | `SearchCache` | `app/cache/search_cache.py` | Search result caching (v3.0) |
 | `BASH_TOOLS` | `app/agent/tools/bash_tools.py` | OpenAI tool definitions (JSON schemas) |
+| `OutputProcessor` | `app/agent/output_processor.py` | Output truncation to limit token usage |
+| `ToolSelector` | `app/agent/tools/tool_selector.py` | Lazy tool loading based on user intent |
 | `Settings` | `app/config.py` | Pydantic settings from environment |
 
 ### Security Model (SandboxExecutor)
 
-- **Whitelisted commands only**: `grep`, `find`, `cat`, `head`, `tail`, `ls`, `wc`
+- **Whitelisted commands only**: `grep`, `find`, `cat`, `head`, `tail`, `ls`, `wc`, `sed`, `tree`
 - **Path confinement**: All paths resolved within `DATA_ROOT_PATH`
 - **Path traversal prevention**: `../` patterns blocked
 - **Timeout protection**: Commands killed after `COMMAND_TIMEOUT` seconds
@@ -91,8 +97,22 @@ User Message → FilesystemAgent.chat() → Azure OpenAI (with BASH_TOOLS)
 | Route | Handler | Purpose |
 |-------|---------|---------|
 | `POST /api/chat` | `app/api/routes/chat.py` | Send message, get response with tool calls |
+| `POST /api/chat/stream` | `app/api/routes/chat.py` | SSE streaming chat response |
 | `GET /api/stream/file/{path}` | `app/api/routes/stream.py` | SSE streaming file content |
 | `GET /api/documents` | `app/api/routes/documents.py` | List/read/write documents |
+
+### Session Management
+
+Chat sessions are stored in-memory with `asyncio.Lock` protection for thread-safe concurrent access:
+
+```python
+_sessions: dict[str, list[dict]] = {}
+_sessions_lock = asyncio.Lock()  # Protects concurrent access
+```
+
+- Session history is limited to 50 messages (oldest removed first)
+- Lock is held only during dict operations, not during LLM calls
+- Copy-on-read pattern prevents external modifications to internal state
 
 ### Configuration
 
@@ -101,7 +121,7 @@ All via environment variables (see `.env.example`). Key settings in `app/config.
 - `AZURE_OPENAI_*`: API credentials (required)
 - `PARALLEL_EXECUTION`: Enable concurrent tool execution (default: true)
 - `CACHE_ENABLED`: Enable v2.0 legacy cache (default: true)
-- `USE_NEW_CACHE`: Enable v3.0 multi-tier cache (default: false)
+- `USE_NEW_CACHE`: Enable v3.0 multi-tier cache (default: true)
 - `CACHE_DIRECTORY`: Cache storage directory (default: tmp/cache)
 - `CACHE_SIZE_LIMIT`: Max cache size in bytes (default: 500MB)
 - `CACHE_CONTENT_TTL`: Content cache TTL (default: 0 = no expiry)
@@ -124,7 +144,25 @@ poetry run pytest tests/test_agent.py::test_chat_returns_response -v
 
 # With coverage
 make test-cov
+
+# Session concurrency tests
+poetry run pytest tests/test_session_concurrency.py -v
 ```
+
+### Key Test Files
+
+| Test File | Coverage |
+|-----------|----------|
+| `test_agent.py` | FilesystemAgent core functionality |
+| `test_sandbox.py` | SandboxExecutor security and execution |
+| `test_cache.py` | ToolResultCache (v2.0) with path invalidation |
+| `test_cached_executor.py` | CachedSandboxExecutor integration |
+| `test_session_concurrency.py` | Async session race condition prevention |
+| `test_integration.py` | End-to-end integration tests |
+| `test_output_processor.py` | Output truncation logic |
+| `test_tool_selector.py` | Lazy tool loading and intent detection |
+| `test_vercel_optimizations_integration.py` | Token optimization integration |
+| `test_e2e_complex_queries.py` | Complex cross-folder queries |
 
 ## Cache System (v3.0)
 
@@ -260,6 +298,20 @@ When testing cache functionality:
    )
    ```
 
+6. **Use proper path format**: Always use `./` prefix for paths in cache tests
+   ```python
+   # Correct - path is recognized for invalidation
+   cache.set(["cat", "./test.txt"], result)
+   cache.invalidate_path("./test.txt")
+
+   # Incorrect - bare filename won't be recognized as a path
+   cache.set(["cat", "test.txt"], result)  # Won't match invalidation
+   ```
+
+   The v2.0 cache uses proper path boundary checking to avoid false positives
+   (e.g., `/data` won't match `/database`). Paths must contain `/` or start
+   with `.` to be recognized; single words are treated as non-paths (grep patterns).
+
 ### Documentation
 
 - [Quick Start](docs/CACHE_QUICKSTART.md) - Get started in 3 lines
@@ -267,6 +319,95 @@ When testing cache functionality:
 - [Integration Guide](docs/CACHE_INTEGRATION_GUIDE.md) - Complete documentation
 - [Cache Manager API](docs/CACHE_MANAGER.md) - API reference
 - [CLI Usage](docs/CACHE_CLI_USAGE.md) - Command-line tools
+
+## Token Optimization (Vercel Patterns)
+
+The project implements token-saving optimizations inspired by Vercel's agentic AI approach. **Benchmark results show ~54% token reduction** on average.
+
+### Key Components
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| `OutputProcessor` | `app/agent/output_processor.py` | Limits output to 200 lines / 50K chars |
+| `ToolSelector` | `app/agent/tools/tool_selector.py` | Selects tools based on user intent |
+| `smart_cat` | `app/agent/tools/bash_tools.py` | Read modes: head, tail, range, full |
+
+### What Actually Works (and What Doesn't)
+
+**IMPORTANT**: Aggressive output truncation (e.g., 50 lines) **BACKFIRES** because:
+1. LLM sees `[OUTPUT TRUNCATED]` message
+2. LLM makes MORE tool calls to get complete data
+3. Results in 200%+ token INCREASE
+
+**Effective strategies:**
+
+| Strategy | Impact | Reliability |
+|----------|--------|-------------|
+| Limit `max_iterations` to 3 | **HUGE** | High - hard cap on loops |
+| Lazy tool loading | Medium (~40%) | Variable by query type |
+| Output limits (200 lines) | Low | High - prevents retry loops |
+| Head-first reading | Low | Only for explicit "first N" requests |
+
+### Configuration
+
+```python
+# CORRECT configuration (saves ~54% tokens)
+agent = FilesystemAgent(
+    max_tool_iterations=3,        # KEY: Prevents runaway loops
+    use_lazy_loading=True,        # Reduces tool definitions
+    output_processor=OutputProcessor(
+        max_lines=200,            # NOT 50 - that causes retries
+        max_chars=50000,
+    ),
+)
+
+# WRONG configuration (INCREASES tokens by 200%+)
+agent = FilesystemAgent(
+    max_tool_iterations=10,       # Too many iterations
+    output_processor=OutputProcessor(
+        max_lines=50,             # Too aggressive - triggers retries
+        max_chars=10000,
+    ),
+)
+```
+
+### Benchmark Results
+
+Run the benchmark: `poetry run python benchmarks/token_usage_comparison_v2.py`
+
+Typical results:
+
+| Query Type | Reduction | Notes |
+|------------|-----------|-------|
+| Search queries | 70-76% | Best results |
+| Analysis queries | 50% | Good results |
+| Directory listings | 35% | Moderate results |
+| Pattern searches | Variable | Can backfire with lazy loading |
+
+**Cost savings at 100 queries/day: ~$290/month**
+
+### Testing Token Optimizations
+
+```bash
+# All optimization tests
+poetry run pytest tests/test_output_processor.py tests/test_tool_selector.py -v
+
+# Integration tests
+poetry run pytest tests/test_vercel_optimizations_integration.py -v
+
+# E2E tests
+poetry run pytest tests/test_e2e_complex_queries.py -v
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `app/agent/output_processor.py` | Output truncation (200 lines default) |
+| `app/agent/tools/tool_selector.py` | Intent-based tool selection |
+| `app/agent/tools/bash_tools.py` | `smart_cat` and head-first `cat` |
+| `benchmarks/token_usage_comparison_v2.py` | Corrected benchmark |
+| `tests/test_vercel_optimizations_integration.py` | Integration tests |
 
 ## Adding New Tools
 

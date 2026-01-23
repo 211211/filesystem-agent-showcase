@@ -76,6 +76,16 @@ BASH_TOOLS = [
                     "path": {
                         "type": "string",
                         "description": "Path to the file to read (relative to data root)"
+                    },
+                    "lines": {
+                        "type": "integer",
+                        "description": "Number of lines to read (default 100)",
+                        "default": 100
+                    },
+                    "full": {
+                        "type": "boolean",
+                        "description": "Read entire file (use sparingly for large files)",
+                        "default": False
                     }
                 },
                 "required": ["path"]
@@ -222,6 +232,48 @@ BASH_TOOLS = [
                 "required": ["path"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "smart_cat",
+            "description": """Read file with smart modes for token efficiency:
+- head: First N lines (default, most token-efficient)
+- tail: Last N lines (good for logs, recent changes)
+- range: Specific line range (good for known locations)
+- full: Entire file (use sparingly, only when necessary)
+
+Always prefer head/tail/range over full to save tokens.""",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to data root"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["head", "tail", "range", "full"],
+                        "default": "head",
+                        "description": "Reading mode - head is default and most efficient"
+                    },
+                    "lines": {
+                        "type": "integer",
+                        "default": 100,
+                        "description": "Number of lines for head/tail modes"
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Starting line for range mode (1-indexed)"
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Ending line for range mode (1-indexed)"
+                    }
+                },
+                "required": ["path"]
+            }
+        }
     }
 ]
 
@@ -252,9 +304,11 @@ def build_find_command(
     return cmd
 
 
-def build_cat_command(path: str) -> list[str]:
-    """Build cat command arguments."""
-    return ["cat", path]
+def build_cat_command(path: str, lines: int = 100, full: bool = False, **kwargs) -> list[str]:
+    """Build cat command - defaults to head for token efficiency."""
+    if full:
+        return ["cat", path]
+    return ["head", "-n", str(lines), path]
 
 
 def build_head_command(path: str, lines: int = 10) -> list[str]:
@@ -300,6 +354,38 @@ def build_wc_command(path: str, lines_only: bool = False) -> list[str]:
     return cmd
 
 
+def build_smart_cat_command(
+    path: str,
+    mode: str = "head",
+    lines: int = 100,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    **kwargs
+) -> list[str]:
+    """Build smart_cat command based on mode.
+
+    Args:
+        path: File path
+        mode: One of 'head', 'tail', 'range', 'full'
+        lines: Number of lines for head/tail
+        start_line: Start line for range mode (1-indexed)
+        end_line: End line for range mode (1-indexed)
+
+    Returns:
+        Command list for subprocess
+    """
+    if mode == "head":
+        return ["head", "-n", str(lines), path]
+    elif mode == "tail":
+        return ["tail", "-n", str(lines), path]
+    elif mode == "range":
+        start = start_line or 1
+        end = end_line or (start + 100)
+        return ["sed", "-n", f"{start},{end}p", path]
+    else:  # full
+        return ["cat", path]
+
+
 def build_smart_read_command(
     path: str,
     query: Optional[str] = None,
@@ -338,6 +424,7 @@ def get_command_builder(tool_name: str) -> Optional[Callable[..., Any]]:
         "tree": build_tree_command,
         "wc": build_wc_command,
         "smart_read": build_smart_read_command,
+        "smart_cat": build_smart_cat_command,
     }
     return builders.get(tool_name)
 
@@ -361,7 +448,11 @@ def build_command(tool_name: str, args: dict[str, Any]) -> list[str]:
             name_pattern=a["name_pattern"],
             file_type=a.get("type", "f")
         ),
-        "cat": lambda a: build_cat_command(path=a["path"]),
+        "cat": lambda a: build_cat_command(
+            path=a["path"],
+            lines=a.get("lines", 100),
+            full=a.get("full", False)
+        ),
         "head": lambda a: build_head_command(
             path=a["path"],
             lines=a.get("lines", 10)
@@ -387,6 +478,13 @@ def build_command(tool_name: str, args: dict[str, Any]) -> list[str]:
             path=a["path"],
             query=a.get("query"),
             max_lines=a.get("max_lines", 100)
+        ),
+        "smart_cat": lambda a: build_smart_cat_command(
+            path=a.get("path"),
+            mode=a.get("mode", "head"),
+            lines=a.get("lines", 100),
+            start_line=a.get("start_line"),
+            end_line=a.get("end_line"),
         ),
     }
 

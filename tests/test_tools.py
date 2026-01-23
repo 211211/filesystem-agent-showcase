@@ -73,11 +73,16 @@ class TestBuildFindCommand:
 
 
 class TestBuildCatCommand:
-    """Tests for cat command building."""
+    """Tests for cat command building (Head-First pattern)."""
 
     def test_basic_cat(self):
-        """Test basic cat command."""
+        """Test basic cat command uses head -n 100 by default (Head-First pattern)."""
         cmd = build_cat_command("file.txt")
+        assert cmd == ["head", "-n", "100", "file.txt"]
+
+    def test_cat_full_reads_entire_file(self):
+        """Test cat with full=True reads entire file."""
+        cmd = build_cat_command("file.txt", full=True)
         assert cmd == ["cat", "file.txt"]
 
 
@@ -163,8 +168,14 @@ class TestBuildCommand:
         assert "*.py" in cmd
 
     def test_build_cat_from_args(self):
-        """Test building cat from argument dict."""
+        """Test building cat from argument dict uses head -n 100 by default."""
         args = {"path": "readme.md"}
+        cmd = build_command("cat", args)
+        assert cmd == ["head", "-n", "100", "readme.md"]
+
+    def test_build_cat_full_from_args(self):
+        """Test building cat with full=True reads entire file."""
+        args = {"path": "readme.md", "full": True}
         cmd = build_command("cat", args)
         assert cmd == ["cat", "readme.md"]
 

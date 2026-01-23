@@ -11,12 +11,14 @@ from dataclasses import dataclass, field
 from openai import AsyncAzureOpenAI
 
 from app.agent.tools.bash_tools import BASH_TOOLS, build_command
+from app.agent.tools.tool_selector import ToolSelector
 from app.agent.prompts import SYSTEM_PROMPT
 from app.sandbox.executor import SandboxExecutor, ExecutionResult
 from app.sandbox.cached_executor import CachedSandboxExecutor
 from app.agent.orchestrator import ParallelToolOrchestrator
 from app.cache import CacheManager
 from app.repositories.tool_registry import ToolRegistry
+from app.agent.output_processor import OutputProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,8 @@ class FilesystemAgent:
         max_concurrent_tools: int = 5,
         cache_manager: Optional[CacheManager] = None,
         tool_registry: Optional[ToolRegistry] = None,
+        output_processor: Optional[OutputProcessor] = None,
+        use_lazy_loading: bool = False,
     ):
         """
         Initialize the filesystem agent.
@@ -108,6 +112,8 @@ class FilesystemAgent:
             max_concurrent_tools: Maximum number of concurrent tool executions
             cache_manager: Optional CacheManager for advanced caching (new system)
             tool_registry: Optional ToolRegistry for tool management (if None, uses legacy BASH_TOOLS)
+            output_processor: Optional OutputProcessor for truncating long outputs (if None, creates default)
+            use_lazy_loading: Whether to enable lazy tool loading based on user intent (default: False)
         """
         self.client = client
         self.deployment_name = deployment_name
@@ -118,6 +124,9 @@ class FilesystemAgent:
         self.max_concurrent_tools = max_concurrent_tools
         self.cache_manager = cache_manager
         self.tool_registry = tool_registry
+        self.output_processor = output_processor or OutputProcessor()
+        self.use_lazy_loading = use_lazy_loading
+        self._used_tools: set[str] = set()
 
         # Initialize orchestrator for parallel execution
         if parallel_execution:
@@ -142,6 +151,39 @@ class FilesystemAgent:
         else:
             # Fallback to legacy BASH_TOOLS for backward compatibility
             return BASH_TOOLS
+
+    def get_tools_for_message(self, user_message: str) -> list[dict]:
+        """
+        Get tool definitions for a specific user message.
+
+        When lazy loading is enabled, this uses ToolSelector to analyze the user's
+        intent and return only relevant tools. This reduces token usage by not
+        sending all tool definitions to the LLM when only a subset is needed.
+
+        Args:
+            user_message: The user's message to analyze for intent
+
+        Returns:
+            List of tool definitions in OpenAI function calling format
+        """
+        if not self.use_lazy_loading:
+            return self.get_tools()
+
+        # Use ToolSelector to select relevant tools based on intent
+        return ToolSelector.select_tools(
+            user_message=user_message,
+            previous_tools=self._used_tools,
+            include_all_on_unknown=True,
+        )
+
+    def reset_used_tools(self) -> None:
+        """
+        Reset the set of used tools.
+
+        Call this when starting a new conversation to clear the tool history
+        used for continuity in lazy loading.
+        """
+        self._used_tools.clear()
 
     def _build_command(self, tool_name: str, arguments: dict) -> list[str]:
         """
@@ -559,6 +601,11 @@ class FilesystemAgent:
         all_tool_calls: list[ToolCall] = []
         all_tool_results: list[dict] = []
 
+        # Select tools based on user intent (lazy loading)
+        tools = self.get_tools_for_message(user_message)
+        if self.use_lazy_loading:
+            logger.info(f"Lazy loading: selected {len(tools)} tools based on intent")
+
         # Agent loop
         for iteration in range(self.max_tool_iterations):
             logger.info(f"Agent iteration {iteration + 1}/{self.max_tool_iterations}")
@@ -567,7 +614,7 @@ class FilesystemAgent:
             response = await self.client.chat.completions.create(
                 model=self.deployment_name,
                 messages=messages,
-                tools=self.get_tools(),
+                tools=tools,
                 tool_choice="auto",
             )
 
@@ -585,6 +632,10 @@ class FilesystemAgent:
             # Parse and execute tool calls
             tool_calls = self._parse_tool_calls(response_message)
             all_tool_calls.extend(tool_calls)
+
+            # Track used tools for lazy loading continuity
+            for tc in tool_calls:
+                self._used_tools.add(tc.name)
 
             # Add assistant message with tool calls to history
             messages.append({
@@ -620,8 +671,9 @@ class FilesystemAgent:
                 }
                 all_tool_results.append(tool_result)
 
-                # Add tool result to messages
-                output = result.stdout if result.success else f"Error: {result.stderr}"
+                # Add tool result to messages (with truncation to save tokens)
+                raw_output = result.stdout if result.success else f"Error: {result.stderr}"
+                output = self.output_processor.process(raw_output)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -673,6 +725,11 @@ class FilesystemAgent:
         all_tool_calls: list[ToolCall] = []
         total_iterations = 0
 
+        # Select tools based on user intent (lazy loading)
+        tools = self.get_tools_for_message(user_message)
+        if self.use_lazy_loading:
+            logger.info(f"Lazy loading: selected {len(tools)} tools based on intent")
+
         yield ("status", {"stage": "thinking", "message": "Analyzing your request..."})
 
         # Agent loop
@@ -691,7 +748,7 @@ class FilesystemAgent:
                 stream = await self.client.chat.completions.create(
                     model=self.deployment_name,
                     messages=messages,
-                    tools=self.get_tools(),
+                    tools=tools,
                     tool_choice="auto",
                     stream=True,
                 )
@@ -759,6 +816,9 @@ class FilesystemAgent:
                     tool_calls.append(tc)
                     all_tool_calls.append(tc)
 
+                    # Track used tools for lazy loading continuity
+                    self._used_tools.add(tc.name)
+
                     # Emit tool_call event
                     yield ("tool_call", {
                         "id": tc.id,
@@ -799,16 +859,18 @@ class FilesystemAgent:
 
                 # Process and stream results
                 for tc, result in execution_results:
-                    output = result.stdout if result.success else f"Error: {result.stderr}"
+                    raw_output = result.stdout if result.success else f"Error: {result.stderr}"
+                    # Apply truncation to save tokens
+                    output = self.output_processor.process(raw_output)
 
                     yield ("tool_result", {
                         "id": tc.id,
                         "name": tc.name,
                         "success": result.success,
-                        "output": output[:1000] + "..." if len(output) > 1000 else output,  # Truncate for streaming
+                        "output": output[:1000] + "..." if len(output) > 1000 else output,  # Further truncate for streaming
                     })
 
-                    # Add tool result to messages
+                    # Add tool result to messages (with full truncated output)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -857,6 +919,8 @@ def create_agent(
     cache_size_limit: int = 500 * 1024 * 1024,
     cache_content_ttl: float = 0,
     cache_search_ttl: float = 300,
+    # Lazy loading parameter
+    use_lazy_loading: bool = False,
 ) -> FilesystemAgent:
     """
     Factory function to create a FilesystemAgent.
@@ -881,6 +945,7 @@ def create_agent(
         cache_size_limit: Maximum size for new cache in bytes (default: 500MB)
         cache_content_ttl: TTL for content cache (default: 0 = no expiry)
         cache_search_ttl: TTL for search cache (default: 300 = 5 minutes)
+        use_lazy_loading: Whether to enable lazy tool loading based on user intent (default: False)
 
     Returns:
         Configured FilesystemAgent instance
@@ -933,4 +998,5 @@ def create_agent(
         parallel_execution=parallel_execution,
         max_concurrent_tools=max_concurrent_tools,
         cache_manager=cache_manager,
+        use_lazy_loading=use_lazy_loading,
     )

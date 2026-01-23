@@ -223,9 +223,13 @@ class TestFilesystemAgentWithoutRegistry:
         assert len(tools) > 0
 
     def test_build_command_without_registry(self, agent_without_registry):
-        """Test that _build_command uses legacy build_command."""
-        # Test cat command
+        """Test that _build_command uses legacy build_command (Head-First pattern)."""
+        # Test cat command - now uses head -n 100 by default
         cmd = agent_without_registry._build_command("cat", {"path": "test.txt"})
+        assert cmd == ["head", "-n", "100", "test.txt"]
+
+        # Test cat with full flag
+        cmd = agent_without_registry._build_command("cat", {"path": "test.txt", "full": True})
         assert cmd == ["cat", "test.txt"]
 
         # Test grep command

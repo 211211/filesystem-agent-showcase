@@ -29,6 +29,7 @@ ALLOWED_COMMANDS = frozenset({
     "tail",   # Read last N lines (POSIX)
     "ls",     # List directory (POSIX)
     "wc",     # Word/line count (POSIX)
+    "sed",    # Stream editor for range mode (POSIX)
 })
 
 # Default limits
