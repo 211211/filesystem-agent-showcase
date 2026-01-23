@@ -130,7 +130,7 @@ class DefaultComponentFactory(ComponentFactory):
         )
 
 
-class TestComponentFactory(ComponentFactory):
+class MockComponentFactory(ComponentFactory):
     """Factory for testing with mock components."""
 
     def __init__(

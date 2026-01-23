@@ -11,7 +11,7 @@ from openai import AsyncAzureOpenAI
 from app.factories.component_factory import (
     ComponentFactory,
     DefaultComponentFactory,
-    TestComponentFactory,
+    MockComponentFactory,
 )
 from app.factories.agent_factory import (
     AgentFactory,
@@ -199,22 +199,22 @@ class TestDefaultComponentFactory:
         assert orchestrator.max_concurrent == orchestrator_config.max_concurrent_tools
 
 
-# TestComponentFactory Tests
+# MockComponentFactory Tests
 
-class TestTestComponentFactory:
-    """Test TestComponentFactory implementation."""
+class TestMockComponentFactory:
+    """Test MockComponentFactory implementation."""
 
     def test_create_client_with_mock(self, openai_config):
         """Test creating client with provided mock."""
         mock_client = MagicMock(spec=AsyncAzureOpenAI)
-        factory = TestComponentFactory(mock_client=mock_client)
+        factory = MockComponentFactory(mock_client=mock_client)
         client = factory.create_client(openai_config)
 
         assert client == mock_client
 
     def test_create_client_without_mock(self, openai_config):
         """Test creating default mock client."""
-        factory = TestComponentFactory()
+        factory = MockComponentFactory()
         client = factory.create_client(openai_config)
 
         # Should be a mock with chat.completions.create method
@@ -225,14 +225,14 @@ class TestTestComponentFactory:
     def test_create_executor_with_mock(self, sandbox_config):
         """Test creating executor with provided mock."""
         mock_executor = MagicMock(spec=SandboxExecutor)
-        factory = TestComponentFactory(mock_executor=mock_executor)
+        factory = MockComponentFactory(mock_executor=mock_executor)
         executor = factory.create_executor(sandbox_config)
 
         assert executor == mock_executor
 
     def test_create_executor_without_mock(self, sandbox_config):
         """Test creating real executor for integration tests."""
-        factory = TestComponentFactory()
+        factory = MockComponentFactory()
         executor = factory.create_executor(sandbox_config)
 
         assert isinstance(executor, SandboxExecutor)
@@ -240,14 +240,14 @@ class TestTestComponentFactory:
     def test_create_cache_manager_with_mock(self, cache_config):
         """Test creating cache manager with provided mock."""
         mock_cache = MagicMock(spec=CacheManager)
-        factory = TestComponentFactory(mock_cache_manager=mock_cache)
+        factory = MockComponentFactory(mock_cache_manager=mock_cache)
         cache_manager = factory.create_cache_manager(cache_config)
 
         assert cache_manager == mock_cache
 
     def test_create_cache_manager_with_explicit_none(self, cache_config):
         """Test creating cache manager with explicit None mock."""
-        factory = TestComponentFactory(mock_cache_manager=None)
+        factory = MockComponentFactory(mock_cache_manager=None)
         cache_manager = factory.create_cache_manager(cache_config)
 
         # Should return None when explicitly set
@@ -255,7 +255,7 @@ class TestTestComponentFactory:
 
     def test_create_cache_manager_test_config(self, cache_config):
         """Test creating test cache manager with smaller limits."""
-        factory = TestComponentFactory()
+        factory = MockComponentFactory()
         cache_manager = factory.create_cache_manager(cache_config)
 
         assert isinstance(cache_manager, CacheManager)
@@ -264,7 +264,7 @@ class TestTestComponentFactory:
     def test_create_orchestrator_with_mock(self, orchestrator_config, sandbox_config):
         """Test creating orchestrator with provided mock."""
         mock_orchestrator = MagicMock(spec=ParallelToolOrchestrator)
-        factory = TestComponentFactory(mock_orchestrator=mock_orchestrator)
+        factory = MockComponentFactory(mock_orchestrator=mock_orchestrator)
         executor = factory.create_executor(sandbox_config)
         orchestrator = factory.create_orchestrator(orchestrator_config, executor)
 
@@ -272,7 +272,7 @@ class TestTestComponentFactory:
 
     def test_create_orchestrator_without_mock(self, orchestrator_config, sandbox_config):
         """Test creating real orchestrator."""
-        factory = TestComponentFactory()
+        factory = MockComponentFactory()
         executor = factory.create_executor(sandbox_config)
         orchestrator = factory.create_orchestrator(orchestrator_config, executor)
 
@@ -293,7 +293,7 @@ class TestAgentFactory:
 
     def test_init_custom_dependencies(self):
         """Test factory initializes with custom dependencies."""
-        custom_component_factory = TestComponentFactory()
+        custom_component_factory = MockComponentFactory()
         custom_tool_registry = create_default_registry()
 
         factory = AgentFactory(
@@ -306,7 +306,7 @@ class TestAgentFactory:
 
     def test_create_agent(self, agent_config):
         """Test creating agent from config."""
-        factory = AgentFactory(component_factory=TestComponentFactory())
+        factory = AgentFactory(component_factory=MockComponentFactory())
         agent = factory.create(agent_config)
 
         assert isinstance(agent, FilesystemAgent)
@@ -318,7 +318,7 @@ class TestAgentFactory:
 
     def test_create_agent_with_cache(self, agent_config):
         """Test creating agent with cache enabled."""
-        factory = AgentFactory(component_factory=TestComponentFactory())
+        factory = AgentFactory(component_factory=MockComponentFactory())
         agent = factory.create(agent_config)
 
         # Cache should be created since config has enabled=True
@@ -335,14 +335,14 @@ class TestAgentFactory:
             search_ttl=300,
         )
 
-        factory = AgentFactory(component_factory=TestComponentFactory())
+        factory = AgentFactory(component_factory=MockComponentFactory())
         agent = factory.create(agent_config)
 
         assert agent.cache_manager is None
 
     def test_create_from_settings(self, mock_settings):
         """Test creating agent from Settings."""
-        factory = AgentFactory(component_factory=TestComponentFactory())
+        factory = AgentFactory(component_factory=MockComponentFactory())
         agent = factory.create_from_settings(mock_settings)
 
         assert isinstance(agent, FilesystemAgent)
@@ -363,7 +363,7 @@ class TestAgentFactorySingleton:
 
     def test_get_agent_factory_with_custom_dependencies(self):
         """Test get_agent_factory uses custom dependencies on first call."""
-        custom_factory = TestComponentFactory()
+        custom_factory = MockComponentFactory()
         custom_registry = create_default_registry()
 
         factory = get_agent_factory(
@@ -380,7 +380,7 @@ class TestAgentFactorySingleton:
         component_factory1 = factory1.component_factory
 
         # Second call with different dependencies should return same factory
-        custom_factory = TestComponentFactory()
+        custom_factory = MockComponentFactory()
         factory2 = get_agent_factory(component_factory=custom_factory)
 
         assert factory2 is factory1
@@ -408,7 +408,7 @@ class TestFactoriesIntegration:
         test_file.write_text("Test content")
 
         # Create factory with test components
-        factory = AgentFactory(component_factory=TestComponentFactory())
+        factory = AgentFactory(component_factory=MockComponentFactory())
 
         # Create agent from settings
         agent = factory.create_from_settings(mock_settings)
@@ -424,7 +424,7 @@ class TestFactoriesIntegration:
         mock_client.chat.completions = MagicMock()
         mock_client.chat.completions.create = AsyncMock()
 
-        test_factory = TestComponentFactory(mock_client=mock_client)
+        test_factory = MockComponentFactory(mock_client=mock_client)
         factory = AgentFactory(component_factory=test_factory)
         agent = factory.create(agent_config)
 
@@ -434,7 +434,7 @@ class TestFactoriesIntegration:
         """Test factory with mock sandbox executor."""
         mock_executor = MagicMock(spec=SandboxExecutor)
 
-        test_factory = TestComponentFactory(mock_executor=mock_executor)
+        test_factory = MockComponentFactory(mock_executor=mock_executor)
         factory = AgentFactory(component_factory=test_factory)
         agent = factory.create(agent_config)
 
@@ -447,7 +447,7 @@ class TestFactoriesIntegration:
         mock_cache = MagicMock(spec=CacheManager)
         mock_orchestrator = MagicMock(spec=ParallelToolOrchestrator)
 
-        test_factory = TestComponentFactory(
+        test_factory = MockComponentFactory(
             mock_client=mock_client,
             mock_executor=mock_executor,
             mock_cache_manager=mock_cache,
@@ -480,7 +480,7 @@ class TestFactoriesEdgeCases:
 
     def test_factory_creates_independent_agents(self, agent_config):
         """Test factory creates independent agent instances."""
-        factory = AgentFactory(component_factory=TestComponentFactory())
+        factory = AgentFactory(component_factory=MockComponentFactory())
 
         agent1 = factory.create(agent_config)
         agent2 = factory.create(agent_config)

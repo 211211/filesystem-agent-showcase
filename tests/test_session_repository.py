@@ -9,7 +9,7 @@ This test suite covers:
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -311,7 +311,7 @@ class TestCleanupExpired:
         session2 = Session(id="test-2")
 
         # Manually set last_accessed to past
-        past_time = datetime.utcnow() - timedelta(seconds=2)
+        past_time = datetime.now(UTC) - timedelta(seconds=2)
         session1.last_accessed = past_time
         session2.last_accessed = past_time
 
@@ -327,7 +327,7 @@ class TestCleanupExpired:
         """Test cleanup with mix of expired and active sessions."""
         # Add expired session
         expired_session = Session(id="expired")
-        expired_session.last_accessed = datetime.utcnow() - timedelta(seconds=2)
+        expired_session.last_accessed = datetime.now(UTC) - timedelta(seconds=2)
         await repository.add(expired_session)
 
         # Add active session

@@ -7,7 +7,7 @@ with proper dependency injection and testability.
 from app.factories.component_factory import (
     ComponentFactory,
     DefaultComponentFactory,
-    TestComponentFactory,
+    MockComponentFactory,
 )
 from app.factories.agent_factory import (
     AgentFactory,
@@ -18,7 +18,7 @@ from app.factories.agent_factory import (
 __all__ = [
     "ComponentFactory",
     "DefaultComponentFactory",
-    "TestComponentFactory",
+    "MockComponentFactory",
     "AgentFactory",
     "get_agent_factory",
     "reset_agent_factory",

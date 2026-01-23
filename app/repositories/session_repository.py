@@ -6,7 +6,7 @@ with automatic TTL-based cleanup and per-session locking for concurrent access.
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Dict, List, Optional
 
 from app.repositories.base import Repository
@@ -29,8 +29,8 @@ class Session:
 
     id: str
     messages: List[Dict] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    last_accessed: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    last_accessed: datetime = field(default_factory=lambda: datetime.now(UTC))
     max_messages: int = 50
 
     def add_message(self, role: str, content: str, **kwargs) -> None:
@@ -49,7 +49,7 @@ class Session:
             "content": content,
             **kwargs
         })
-        self.last_accessed = datetime.utcnow()
+        self.last_accessed = datetime.now(UTC)
 
         # Truncate if exceeds max
         if len(self.messages) > self.max_messages:
@@ -69,7 +69,7 @@ class Session:
         The last_accessed timestamp is updated.
         """
         self.messages = []
-        self.last_accessed = datetime.utcnow()
+        self.last_accessed = datetime.now(UTC)
 
 
 class SessionRepository(Repository[Session]):
@@ -133,7 +133,7 @@ class SessionRepository(Repository[Session]):
         async with lock:
             session = self._sessions.get(id)
             if session:
-                session.last_accessed = datetime.utcnow()
+                session.last_accessed = datetime.now(UTC)
             return session
 
     async def get_or_create(self, id: str) -> Session:
@@ -157,7 +157,7 @@ class SessionRepository(Repository[Session]):
                     max_messages=self.max_messages
                 )
             session = self._sessions[id]
-            session.last_accessed = datetime.utcnow()
+            session.last_accessed = datetime.now(UTC)
             return session
 
     async def get_all(self) -> List[Session]:
@@ -242,7 +242,7 @@ class SessionRepository(Repository[Session]):
         Returns:
             The number of sessions removed
         """
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         expired_ids = []
 
         async with self._global_lock:
